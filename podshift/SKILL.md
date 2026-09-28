@@ -7,7 +7,7 @@ metadata:
 
 # Podshift
 
-Personal controller. Tokens live in `$PODSHIFT_HOME` (`/workspace/.podshift` on this agent, otherwise `~/.podshift`). Never print client secrets, access tokens, or refresh tokens. Set `PODSHIFT_DISABLED=1` to skip the Pod write. The nightly schedule is `Podshift bedtime`, 9:00pm America/Chicago.
+Personal controller. Tokens live in `$PODSHIFT_HOME` (`/workspace/.podshift` on this agent, otherwise `~/.podshift`). Never print client secrets, access tokens, or refresh tokens. Set `PODSHIFT_DISABLED=1` to skip the Pod write. Primary schedule is `Podshift bedtime` at 9:00pm America/Chicago. Fallback daemon runs at 9:25pm on this container and skips if `last_run.json` already shows tonight applied. Pause only the fallback with `$PODSHIFT_HOME/fallback.paused`.
 
 ## Whoop login
 

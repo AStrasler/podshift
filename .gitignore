@@ -7,7 +7,14 @@ data/
 **/*session*.json
 authorize_url.txt
 last_run.json
+last_dry_run.json
 baseline.json
+scheduler.log
+fallback.log
+fallback.pid
+fallback.status.json
+fallback.paused
+apply.lock
 
 __pycache__/
 *.pyc

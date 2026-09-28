@@ -35,13 +35,31 @@ Levels are clamped to -100..100. The write is skipped when recovery is missing, 
 
 Power is left alone. If that write unexpectedly changes the power state, the previous state is restored. Autopilot is expected to turn the Pod on by itself.
 
+## Schedulers
+
+Primary: the Gamut task `Podshift bedtime`, 9:00pm America/Chicago. It sets `scheduler` to `gamut`.
+
+Fallback: a daemon on this agent container, not a second Gamut task. It wakes at 9:25pm America/Chicago and runs `fallback.py`. If `last_run.json` already has `applied: true` for that Chicago date, it does not call `apply.py`. Both paths take the same file lock, so a late primary and the fallback cannot write at the same time.
+
+Which one handled the night is the `scheduler` field in `$PODSHIFT_HOME/last_run.json`. A skipped fallback is a line in `$PODSHIFT_HOME/scheduler.log` with `handled_by`.
+
+Pause the fallback without stopping the 9:00pm task:
+
+```bash
+touch "${PODSHIFT_HOME:-$HOME/.podshift}/fallback.paused"
+```
+
+Resume with `rm` on that file. Stop the daemon with `kill "$(cat "${PODSHIFT_HOME:-$HOME/.podshift}/fallback.pid")"`. `PODSHIFT_DISABLED=1` skips the Pod write for both schedulers.
+
+This container has no cron daemon and is not a separate home server. The fallback runs only while this container process is alive. After a container restart it must be started again. Status is `$PODSHIFT_HOME/fallback.status.json`.
+
 ## Pause or disable
 
 - Skip tonight's write without deleting the schedule: `PODSHIFT_DISABLED=1`.
-- Stop the daily run on this agent: pause or cancel the `Podshift bedtime` schedule.
-- Stop an independent cron job: remove or comment out its crontab line.
+- Stop the daily Gamut run: pause or cancel the `Podshift bedtime` schedule.
+- Stop only the fallback: create `fallback.paused`, or kill its pid.
 
-`--dry-run` reads WHOOP and the Pod and writes nothing.
+`--dry-run` reads WHOOP and the Pod and does not update `last_run.json`.
 
 ## Setup
 

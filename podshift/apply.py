@@ -4,10 +4,12 @@
 Does not turn the Pod on. If a write changes power state, the previous state is restored.
 """
 
+import fcntl
 import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,6 +51,52 @@ def levels_from(baseline: dict, score: float) -> tuple[dict, int]:
 
 def disabled() -> bool:
     return os.environ.get("PODSHIFT_DISABLED", "").lower() in {"1", "true", "yes"}
+
+
+def scheduler_name() -> str:
+    if "--scheduler" in sys.argv:
+        index = sys.argv.index("--scheduler")
+        return sys.argv[index + 1]
+    return os.environ.get("PODSHIFT_SCHEDULER", "manual")
+
+
+def append_scheduler_log(entry: dict) -> None:
+    path = _path("scheduler.log")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(entry) + "\n")
+    path.chmod(0o600)
+
+
+@contextmanager
+def apply_lock():
+    path = _path("apply.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def already_applied_tonight(now: datetime | None = None) -> dict | None:
+    path = _path("last_run.json")
+    if not path.exists():
+        return None
+    record = json.loads(path.read_text())
+    if not record.get("applied") or record.get("dry_run"):
+        return None
+    stamp = record.get("at")
+    if not stamp:
+        return None
+    applied_at = datetime.fromisoformat(stamp)
+    if applied_at.tzinfo is None:
+        applied_at = applied_at.replace(tzinfo=TZ)
+    current = now or datetime.now(TZ)
+    if applied_at.astimezone(TZ).date() != current.astimezone(TZ).date():
+        return None
+    return record
 
 
 def save_json(path: Path, payload: dict) -> None:
@@ -264,6 +312,7 @@ def main() -> None:
         result = {
             "at": now,
             "dry_run": False,
+            "scheduler": scheduler_name(),
             "skipped": "disabled",
             "recovery_score": recovery.get("recovery_score"),
             "applied": False,
@@ -275,12 +324,26 @@ def main() -> None:
         save_json(_path("last_run.json"), result)
         print(json.dumps(result))
         return
-    token = eight_token()
-    token, user_id = user_id_for(token)
-    token, before = eight_get_temperature(token, user_id)
+    with apply_lock():
+        prior = already_applied_tonight()
+        if prior and not dry_run:
+            result = {
+                "at": now,
+                "scheduler": scheduler_name(),
+                "skipped": "already_applied",
+                "handled_by": prior.get("scheduler", "unknown"),
+                "applied": False,
+            }
+            append_scheduler_log(result)
+            print(json.dumps(result))
+            return
+        token = eight_token()
+        token, user_id = user_id_for(token)
+        token, before = eight_get_temperature(token, user_id)
     before_power = power_state(before)
     result = {
         "at": now,
+        "scheduler": scheduler_name(),
         "dry_run": dry_run,
         "recovery_score": recovery.get("recovery_score"),
         "score_state": recovery.get("score_state"),
@@ -290,27 +353,42 @@ def main() -> None:
     }
     if planned is None:
         result["skipped"] = recovery.get("status") or "unscored"
-        save_json(_path("last_run.json"), result)
+        if not dry_run:
+            save_json(_path("last_run.json"), result)
         print(json.dumps(result))
         return
     levels, delta = planned
     result["offset"] = delta
     result["target"] = levels
     if dry_run:
-        save_json(_path("last_run.json"), result)
+        save_json(_path("last_dry_run.json"), result)
         print(json.dumps(result))
         return
-    write_smart(token, user_id, levels)
-    token, after = eight_get_temperature(token, user_id)
-    after_power = power_state(after)
-    if before_power and after_power and after_power != before_power:
-        set_power(token, user_id, before_power)
+    with apply_lock():
+        prior = already_applied_tonight()
+        if prior:
+            result = {
+                "at": now,
+                "scheduler": scheduler_name(),
+                "skipped": "already_applied",
+                "handled_by": prior.get("scheduler", "unknown"),
+                "applied": False,
+            }
+            append_scheduler_log(result)
+            print(json.dumps(result))
+            return
+        write_smart(token, user_id, levels)
         token, after = eight_get_temperature(token, user_id)
-        result["power_restored"] = True
-    result["applied"] = True
-    result["after_power"] = power_state(after)
-    result["after_smart"] = after.get("smart")
-    save_json(_path("last_run.json"), result)
+        after_power = power_state(after)
+        if before_power and after_power and after_power != before_power:
+            set_power(token, user_id, before_power)
+            token, after = eight_get_temperature(token, user_id)
+            result["power_restored"] = True
+        result["applied"] = True
+        result["after_power"] = power_state(after)
+        result["after_smart"] = after.get("smart")
+        save_json(_path("last_run.json"), result)
+        append_scheduler_log({"at": now, "scheduler": scheduler_name(), "action": "applied"})
     print(json.dumps(result))
 
 
