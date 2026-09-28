@@ -33,7 +33,15 @@ async function request(url: string, init: RequestInit, label: string) {
     throw new Error(label + "_http_" + response.status);
   }
   const body = await response.text();
-  return body ? JSON.parse(body) : {};
+  if (!body) return {};
+  try {
+    return JSON.parse(body);
+  } catch {
+    // A successful write may return plain text. Never skip the follow-up Pod
+    // read (and potential power restoration) because of its response format.
+    if (label === "eight_write" || label === "eight_power_restore") return {};
+    throw new Error(label + "_non_json_response");
+  }
 }
 async function recoveryScore(state: State): Promise<number | null> {
   const refreshToken = state.whoop_refresh_token || env("WHOOP_INITIAL_REFRESH_TOKEN");
@@ -78,8 +86,11 @@ async function pod() {
     "Content-Type": "application/json", Accept: "application/json",
     "User-Agent": "okhttp/4.9.3",
   };
-  const me = await request("https://client-api.8slp.net/v1/users/me", { headers }, "eight_user");
-  const userId = token.userId || me.user?.userId;
+  let userId = token.userId;
+  if (!userId) {
+    const me = await request("https://client-api.8slp.net/v1/users/me", { headers }, "eight_user");
+    userId = me.user?.userId;
+  }
   if (!userId) throw new Error("eight_user_missing");
   const url = "https://app-api.8slp.net/v1/users/" + encodeURIComponent(userId) +
     "/temperature/pod";
