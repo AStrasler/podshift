@@ -23,7 +23,15 @@ const env = (name: string) => {
 };
 async function request(url: string, init: RequestInit, label: string) {
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30000) });
-  if (!response.ok) throw new Error(label + "_http_" + response.status);
+  if (!response.ok) {
+    if (label === "eight_login") {
+      const body = await response.json().catch(() => ({}));
+      const code = body?.error;
+      if (typeof code === "string" && /^[a-zA-Z0-9_-]{1,40}$/.test(code))
+        throw new Error(label + "_http_" + response.status + "_" + code);
+    }
+    throw new Error(label + "_http_" + response.status);
+  }
   const body = await response.text();
   return body ? JSON.parse(body) : {};
 }
