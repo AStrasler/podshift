@@ -1,0 +1,7 @@
+{
+  "bedTimeLevel": 0,
+  "initialSleepLevel": 0,
+  "finalSleepLevel": 0,
+  "timezone": "America/Chicago",
+  "note": "Copy to /workspace/.podshift/baseline.json and set your saved Autopilot levels. Offsets are computed from this file, never from the current Pod values."
+}

@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+
+.podshift/
+**/*session*.json
+authorize_url.txt
+last_run.json
+
+__pycache__/
+*.pyc
+.venv/
