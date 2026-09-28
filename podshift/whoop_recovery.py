@@ -8,20 +8,23 @@ from pathlib import Path
 
 import requests
 
+from home import home
+
 TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 API = "https://api.prod.whoop.com/developer/v2"
-SESSION_PATH = Path("/workspace/.podshift/whoop_session.json")
+def session_path() -> Path:
+    return home() / "whoop_session.json"
 
 
 def load() -> dict:
-    if not SESSION_PATH.exists():
+    if not session_path().exists():
         raise SystemExit("no Whoop session; run whoop_auth.py first")
-    return json.loads(SESSION_PATH.read_text())
+    return json.loads(session_path().read_text())
 
 
 def save(payload: dict) -> None:
-    SESSION_PATH.write_text(json.dumps(payload))
-    SESSION_PATH.chmod(0o600)
+    session_path().write_text(json.dumps(payload))
+    session_path().chmod(0o600)
 
 
 def refresh(session: dict) -> dict:

@@ -3,9 +3,11 @@
 !.env.example
 
 .podshift/
+data/
 **/*session*.json
 authorize_url.txt
 last_run.json
+baseline.json
 
 __pycache__/
 *.pyc

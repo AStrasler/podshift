@@ -11,9 +11,12 @@ from pathlib import Path
 
 import requests
 
+from home import home
+
 AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
 TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
-REDIRECT_URI = "http://localhost:8787/callback"
+def redirect_uri() -> str:
+    return os.environ.get("WHOOP_REDIRECT_URI", "http://localhost:8787/callback")
 STATE = "podshift"
 SCOPES = " ".join(
     [
@@ -26,19 +29,23 @@ SCOPES = " ".join(
         "offline",
     ]
 )
-SESSION_PATH = Path("/workspace/.podshift/whoop_session.json")
-URL_PATH = Path("/workspace/.podshift/authorize_url.txt")
+def session_path() -> Path:
+    return home() / "whoop_session.json"
+
+
+def url_path() -> Path:
+    return home() / "authorize_url.txt"
 
 
 def session_dir() -> None:
-    SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    session_path().parent.mkdir(parents=True, exist_ok=True)
 
 
 def authorize_url() -> str:
     query = urllib.parse.urlencode(
         {
             "client_id": os.environ["WHOOP_CLIENT_ID"],
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": redirect_uri(),
             "response_type": "code",
             "scope": SCOPES,
             "state": STATE,
@@ -55,7 +62,7 @@ def exchange(code: str) -> dict:
             "code": code,
             "client_id": os.environ["WHOOP_CLIENT_ID"],
             "client_secret": os.environ["WHOOP_CLIENT_SECRET"],
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": redirect_uri(),
         },
         timeout=30,
     )
@@ -65,8 +72,8 @@ def exchange(code: str) -> dict:
     if "access_token" not in payload:
         raise SystemExit("token response missing access_token")
     session_dir()
-    SESSION_PATH.write_text(json.dumps(payload))
-    SESSION_PATH.chmod(0o600)
+    session_path().write_text(json.dumps(payload))
+    session_path().chmod(0o600)
     return payload
 
 
@@ -125,7 +132,7 @@ def main() -> None:
     args = parser.parse_args()
     session_dir()
     url = authorize_url()
-    URL_PATH.write_text(url)
+    url_path().write_text(url)
     if args.print_url:
         print(url)
         return
@@ -134,7 +141,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "saved": str(SESSION_PATH),
+                "saved": str(session_path()),
                 "has_refresh_token": "refresh_token" in payload,
                 "expires_in": payload.get("expires_in"),
                 "scope": payload.get("scope"),

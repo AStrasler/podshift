@@ -7,18 +7,21 @@ from pathlib import Path
 
 import requests
 
+from home import home
+
 AUTH_URL = "https://auth-api.8slp.net/v1/tokens"
 CLIENT_API = "https://client-api.8slp.net/v1"
 APP_API = "https://app-api.8slp.net/v1"
 CLIENT_ID = "0894c7f33bb94800a03f1f4df13a4f38"
 CLIENT_SECRET = "f0954a3ed5763ba3d06834c73731a32f15f168f47d4f164751275def86db0c76"
-SESSION_PATH = Path("/workspace/.podshift/eight_session.json")
+def session_path() -> Path:
+    return home() / "eight_session.json"
 
 
 def save(payload: dict) -> None:
-    SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SESSION_PATH.write_text(json.dumps(payload))
-    SESSION_PATH.chmod(0o600)
+    session_path().parent.mkdir(parents=True, exist_ok=True)
+    session_path().write_text(json.dumps(payload))
+    session_path().chmod(0o600)
 
 
 def login() -> dict:

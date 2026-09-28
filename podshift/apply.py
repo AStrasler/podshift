@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from home import home
+
 TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 WHOOP_API = "https://api.prod.whoop.com/developer/v2"
 AUTH_URL = "https://auth-api.8slp.net/v1/tokens"
@@ -21,11 +23,8 @@ CLIENT_API = "https://client-api.8slp.net/v1"
 APP_API = "https://app-api.8slp.net/v1"
 CLIENT_ID = "0894c7f33bb94800a03f1f4df13a4f38"
 CLIENT_SECRET = "f0954a3ed5763ba3d06834c73731a32f15f168f47d4f164751275def86db0c76"
-ROOT = Path("/workspace/.podshift")
-WHOOP_SESSION = ROOT / "whoop_session.json"
-EIGHT_SESSION = ROOT / "eight_session.json"
-BASELINE_PATH = ROOT / "baseline.json"
-LOG_PATH = ROOT / "last_run.json"
+def _path(name: str) -> Path:
+    return home() / name
 TZ = ZoneInfo("America/Chicago")
 STAGES = ("bedTimeLevel", "initialSleepLevel", "finalSleepLevel")
 
@@ -42,6 +41,16 @@ def offset_for(score: float) -> int:
     return -10
 
 
+def levels_from(baseline: dict, score: float) -> tuple[dict, int]:
+    delta = offset_for(float(score))
+    levels = {stage: clamp(int(baseline[stage]) + delta) for stage in STAGES}
+    return levels, delta
+
+
+def disabled() -> bool:
+    return os.environ.get("PODSHIFT_DISABLED", "").lower() in {"1", "true", "yes"}
+
+
 def save_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload))
@@ -49,9 +58,9 @@ def save_json(path: Path, payload: dict) -> None:
 
 
 def whoop_session() -> dict:
-    if not WHOOP_SESSION.exists():
+    if not _path("whoop_session.json").exists():
         raise SystemExit("no Whoop session")
-    return json.loads(WHOOP_SESSION.read_text())
+    return json.loads(_path("whoop_session.json").read_text())
 
 
 def refresh_whoop(session: dict) -> dict:
@@ -70,7 +79,7 @@ def refresh_whoop(session: dict) -> dict:
         raise SystemExit(f"whoop refresh failed: {response.status_code}")
     updated = response.json()
     updated["obtained_at"] = int(time.time())
-    save_json(WHOOP_SESSION, updated)
+    save_json(_path("whoop_session.json"), updated)
     return updated
 
 
@@ -148,7 +157,7 @@ def eight_login() -> str:
         raise SystemExit(f"eight login failed: {response.status_code}")
     payload = response.json()
     save_json(
-        EIGHT_SESSION,
+        _path("eight_session.json"),
         {
             "access_token": payload["access_token"],
             "refresh_token": payload.get("refresh_token"),
@@ -161,8 +170,8 @@ def eight_login() -> str:
 
 
 def eight_token() -> str:
-    if EIGHT_SESSION.exists():
-        session = json.loads(EIGHT_SESSION.read_text())
+    if _path("eight_session.json").exists():
+        session = json.loads(_path("eight_session.json").read_text())
         if session.get("access_token"):
             return session["access_token"]
     return eight_login()
@@ -187,7 +196,7 @@ def eight_get_temperature(token: str, user_id: str) -> tuple[str, dict]:
 
 
 def user_id_for(token: str) -> tuple[str, str]:
-    session = json.loads(EIGHT_SESSION.read_text()) if EIGHT_SESSION.exists() else {}
+    session = json.loads(_path("eight_session.json").read_text()) if _path("eight_session.json").exists() else {}
     user_id = session.get("userId")
     if user_id:
         return token, user_id
@@ -242,10 +251,8 @@ def target_levels(recovery: dict) -> tuple[dict, int] | None:
     score = recovery.get("recovery_score")
     if score is None:
         return None
-    baseline = json.loads(BASELINE_PATH.read_text())
-    delta = offset_for(float(score))
-    levels = {stage: clamp(int(baseline[stage]) + delta) for stage in STAGES}
-    return levels, delta
+    baseline = json.loads(_path("baseline.json").read_text())
+    return levels_from(baseline, float(score))
 
 
 def main() -> None:
@@ -253,6 +260,21 @@ def main() -> None:
     now = datetime.now(TZ).isoformat(timespec="seconds")
     recovery = latest_recovery()
     planned = target_levels(recovery)
+    if disabled() and not dry_run:
+        result = {
+            "at": now,
+            "dry_run": False,
+            "skipped": "disabled",
+            "recovery_score": recovery.get("recovery_score"),
+            "applied": False,
+        }
+        if planned:
+            levels, delta = planned
+            result["offset"] = delta
+            result["target"] = levels
+        save_json(_path("last_run.json"), result)
+        print(json.dumps(result))
+        return
     token = eight_token()
     token, user_id = user_id_for(token)
     token, before = eight_get_temperature(token, user_id)
@@ -268,14 +290,14 @@ def main() -> None:
     }
     if planned is None:
         result["skipped"] = recovery.get("status") or "unscored"
-        save_json(LOG_PATH, result)
+        save_json(_path("last_run.json"), result)
         print(json.dumps(result))
         return
     levels, delta = planned
     result["offset"] = delta
     result["target"] = levels
     if dry_run:
-        save_json(LOG_PATH, result)
+        save_json(_path("last_run.json"), result)
         print(json.dumps(result))
         return
     write_smart(token, user_id, levels)
@@ -288,7 +310,7 @@ def main() -> None:
     result["applied"] = True
     result["after_power"] = power_state(after)
     result["after_smart"] = after.get("smart")
-    save_json(LOG_PATH, result)
+    save_json(_path("last_run.json"), result)
     print(json.dumps(result))
 
 

@@ -2,12 +2,12 @@
 name: Podshift
 description: Read the owner's Whoop recovery and shift Eight Sleep Pod temperature before bed. Use for Whoop login, recovery checks, and Pod temperature changes.
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Podshift
 
-Personal controller. Whoop OAuth tokens live in `/workspace/.podshift/whoop_session.json`. Never print client secrets, access tokens, or refresh tokens.
+Personal controller. Tokens live in `$PODSHIFT_HOME` (`/workspace/.podshift` on this agent, otherwise `~/.podshift`). Never print client secrets, access tokens, or refresh tokens. Set `PODSHIFT_DISABLED=1` to skip the Pod write. The nightly schedule is `Podshift bedtime`, 9:00pm America/Chicago.
 
 ## Whoop login
 
