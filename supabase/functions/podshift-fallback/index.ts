@@ -21,9 +21,9 @@ const env = (name: string) => {
   if (!value) throw new Error("missing_" + name);
   return value;
 };
-async function request(url: string, init: RequestInit) {
+async function request(url: string, init: RequestInit, label: string) {
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30000) });
-  if (!response.ok) throw new Error("upstream_http_" + response.status);
+  if (!response.ok) throw new Error(label + "_http_" + response.status);
   const body = await response.text();
   return body ? JSON.parse(body) : {};
 }
@@ -36,14 +36,14 @@ async function recoveryScore(state: State): Promise<number | null> {
   });
   const session = await request("https://api.prod.whoop.com/oauth/oauth2/token", {
     method: "POST", body: form,
-  });
+  }, "whoop_refresh");
   // Refresh tokens rotate; commit the replacement before making any other API call.
   if (!session.refresh_token) throw new Error("whoop_refresh_token_missing");
   await db`update podshift_private.state set whoop_refresh_token = ${session.refresh_token},
     updated_at = now() where id = 1`;
   const headers = { Authorization: "Bearer " + session.access_token };
   const base = "https://api.prod.whoop.com/developer/v2";
-  const cycles = await request(base + "/cycle?limit=1", { headers });
+  const cycles = await request(base + "/cycle?limit=1", { headers }, "whoop_cycle");
   const cycle = cycles.records?.[0];
   if (!cycle) return null;
   const response = await fetch(base + "/cycle/" + encodeURIComponent(cycle.id) + "/recovery",
@@ -64,19 +64,19 @@ async function pod() {
       password: env("EIGHT_SLEEP_PASSWORD"),
       client_id: eightClientId, client_secret: eightClientSecret,
     }),
-  });
+  }, "eight_login");
   const headers = {
     Authorization: "Bearer " + token.access_token,
     "Content-Type": "application/json", Accept: "application/json",
     "User-Agent": "okhttp/4.9.3",
   };
-  const me = await request("https://client-api.8slp.net/v1/users/me", { headers });
+  const me = await request("https://client-api.8slp.net/v1/users/me", { headers }, "eight_user");
   const userId = token.userId || me.user?.userId;
   if (!userId) throw new Error("eight_user_missing");
   const url = "https://app-api.8slp.net/v1/users/" + encodeURIComponent(userId) +
     "/temperature/pod";
   const read = () => request("https://app-api.8slp.net/v1/users/" +
-    encodeURIComponent(userId) + "/temperature", { headers });
+    encodeURIComponent(userId) + "/temperature", { headers }, "eight_temperature");
   return { headers, url, read };
 }
 function target(baseline: Record<string, number>, score: number) {
@@ -103,13 +103,13 @@ async function run(state: State, dryRun: boolean) {
   const beforePower = before.currentState?.type;
   await request(eight.url + "?ignoreDeviceErrors=true", {
     method: "PUT", headers: eight.headers, body: JSON.stringify({ smart: expected }),
-  });
+  }, "eight_write");
   let after = await eight.read();
   if (beforePower && after.currentState?.type !== beforePower) {
     await request(eight.url + "?ignoreDeviceErrors=true", {
       method: "PUT", headers: eight.headers,
       body: JSON.stringify({ currentState: { type: beforePower } }),
-    });
+    }, "eight_power_restore");
     after = await eight.read();
     if (after.currentState?.type !== beforePower) throw new Error("power_restore_failed");
   }
