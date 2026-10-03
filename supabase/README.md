@@ -52,6 +52,8 @@ completed before the response failed.
 
 ## Limits
 
+- No away/home check. `podshift_private.state` has no column for it, and none is added here. `PODSHIFT_AWAY` is honored only by the Python `apply.py` path.
+
 - Gamut and Supabase do not share a lock or completion record. Supabase reads
   the Pod's actual target levels, so a successful Gamut write usually leads
   to a skip. If Gamut and Supabase overlap, both may write the same values.

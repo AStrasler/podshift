@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from apply import TZ, already_applied_tonight, apply_lock, clamp, levels_from, offset_for
+from apply import TZ, already_applied_tonight, apply_lock, away, clamp, levels_from, offset_for
 
 BASELINE = {
     "bedTimeLevel": 32,
@@ -94,6 +94,22 @@ class AlreadyAppliedTests(unittest.TestCase):
             found = already_applied_tonight()
         thread.join(timeout=2)
         self.assertEqual(found["scheduler"], "gamut")
+
+
+class AwayTests(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("PODSHIFT_AWAY", None)
+
+    def test_unset_does_not_skip(self):
+        os.environ.pop("PODSHIFT_AWAY", None)
+        self.assertFalse(away())
+
+    def test_truthy_values(self):
+        for value in ("1", "true", "yes", "TRUE"):
+            os.environ["PODSHIFT_AWAY"] = value
+            self.assertTrue(away(), value)
+        os.environ["PODSHIFT_AWAY"] = "0"
+        self.assertFalse(away())
 
 
 if __name__ == "__main__":
