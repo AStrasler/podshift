@@ -53,6 +53,11 @@ def disabled() -> bool:
     return os.environ.get("PODSHIFT_DISABLED", "").lower() in {"1", "true", "yes"}
 
 
+def away() -> bool:
+    """Manual switch only. There is no location signal; unset does not skip."""
+    return os.environ.get("PODSHIFT_AWAY", "").lower() in {"1", "true", "yes"}
+
+
 def scheduler_name() -> str:
     if "--scheduler" in sys.argv:
         index = sys.argv.index("--scheduler")
@@ -314,6 +319,22 @@ def main() -> None:
             "dry_run": False,
             "scheduler": scheduler_name(),
             "skipped": "disabled",
+            "recovery_score": recovery.get("recovery_score"),
+            "applied": False,
+        }
+        if planned:
+            levels, delta = planned
+            result["offset"] = delta
+            result["target"] = levels
+        save_json(_path("last_run.json"), result)
+        print(json.dumps(result))
+        return
+    if away() and not dry_run:
+        result = {
+            "at": now,
+            "dry_run": False,
+            "scheduler": scheduler_name(),
+            "skipped": "away",
             "recovery_score": recovery.get("recovery_score"),
             "applied": False,
         }
