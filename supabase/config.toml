@@ -1,0 +1,2 @@
+[functions.podshift-fallback]
+verify_jwt = false

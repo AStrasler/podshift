@@ -6,6 +6,8 @@ reads the latest scored WHOOP recovery, calculates from the saved green-day
 baseline, reads Eight Sleep Autopilot levels, and **skips the write if the Pod
 is already at the desired levels**. It never turns the Pod on.
 
+This function is authorized by the `X-Podshift-Cron` header, not by a user JWT.
+
 This fallback is initially **disabled**. It needs a separate WHOOP refresh
 token and its own Eight Sleep credentials in this project's Edge Function
 Secrets. Never put these values in GitHub, the SQL editor, or a chat.
