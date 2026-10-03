@@ -56,8 +56,11 @@ This container has no cron daemon and is not a separate home server. The fallbac
 ## Pause or disable
 
 - Skip tonight's write without deleting the schedule: `PODSHIFT_DISABLED=1`.
+- Skip the write while away from home: `PODSHIFT_AWAY=1`.
 - Stop the daily Gamut run: pause or cancel the `Podshift bedtime` schedule.
 - Stop only the fallback: create `fallback.paused`, or kill its pid.
+
+There is no GPS, geofence, or other presence signal in this repo. `PODSHIFT_AWAY=1` (`true` and `yes` also count) makes `apply.py` skip the Eight Sleep write and record `skipped` as `away`. Leave it unset and the Pod write is unchanged. The Supabase fallback still has no away check: `podshift_private.state` has no away column, and this change does not add one, so that 9:25pm function can still write unless `enabled` is set to false.
 
 `--dry-run` reads WHOOP and the Pod and does not update `last_run.json`.
 
@@ -89,6 +92,7 @@ Optional:
 | `WHOOP_REDIRECT_URI` | Must match the WHOOP app. Default `http://localhost:8787/callback` |
 | `PODSHIFT_HOME` | Directory for tokens, baseline, and `last_run.json` |
 | `PODSHIFT_DISABLED` | `1`, `true`, or `yes` skips the Pod write |
+| `PODSHIFT_AWAY` | `1`, `true`, or `yes` skips the Pod write while away. Unset does nothing |
 
 WHOOP app scopes: `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, `read:profile`, `read:body_measurement`. Request `offline` in the authorize URL. It is not a checkbox on the app form. Privacy policy URL for that app is the `PRIVACY.md` file in this repo.
 
