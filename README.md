@@ -84,6 +84,8 @@ Required environment variables:
 | `WHOOP_CLIENT_SECRET` | WHOOP developer app client secret |
 | `EIGHT_SLEEP_EMAIL` | Eight Sleep account email |
 | `EIGHT_SLEEP_PASSWORD` | Eight Sleep account password |
+| `EIGHT_SLEEP_CLIENT_ID` | Eight Sleep OAuth client id. Must be set outside git |
+| `EIGHT_SLEEP_CLIENT_SECRET` | Eight Sleep OAuth client secret. Must be set outside git |
 
 Optional:
 
@@ -134,7 +136,7 @@ Access tokens expire in about an hour. `apply.py` refreshes them. Reconnect only
 
 ## Reconnect Eight Sleep
 
-There is no separate OAuth app. Login uses the account email and password.
+There is no separate OAuth app. Login uses the account email and password, plus `EIGHT_SLEEP_CLIENT_ID` and `EIGHT_SLEEP_CLIENT_SECRET`. Both client values must be set outside git.
 
 1. Put the current password in `EIGHT_SLEEP_PASSWORD`.
 2. Delete `$PODSHIFT_HOME/eight_session.json`.

@@ -14,8 +14,9 @@ Secrets. Never put these values in GitHub, the SQL editor, or a chat.
 
 In the [Podshift project Edge Function Secrets](https://supabase.com/dashboard/project/occbockorwzmykztvziu/functions/secrets),
 set `WHOOP_CLIENT_ID`, `WHOOP_CLIENT_SECRET`,
-`WHOOP_INITIAL_REFRESH_TOKEN`, `EIGHT_SLEEP_EMAIL`, and
-`EIGHT_SLEEP_PASSWORD`. Obtain the WHOOP refresh token using the existing
+`WHOOP_INITIAL_REFRESH_TOKEN`, `EIGHT_SLEEP_EMAIL`,
+`EIGHT_SLEEP_PASSWORD`, `EIGHT_SLEEP_CLIENT_ID`, and
+`EIGHT_SLEEP_CLIENT_SECRET` outside git. Obtain the WHOOP refresh token using the existing
 `podshift/whoop_auth.py` with the offline scope. Once the function uses it,
 the rotated token lives in the project's private database state.
 

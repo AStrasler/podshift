@@ -9,8 +9,6 @@ const localDate = () => {
   return part("year") + "-" + part("month") + "-" + part("day");
 };
 const levels = ["bedTimeLevel", "initialSleepLevel", "finalSleepLevel"] as const;
-const eightClientId = "0894c7f33bb94800a03f1f4df13a4f38";
-const eightClientSecret = "f0954a3ed5763ba3d06834c73731a32f15f168f47d4f164751275def86db0c76";
 
 type State = {
   cron_key: string; whoop_refresh_token: string | null;
@@ -78,7 +76,7 @@ async function pod() {
     body: new URLSearchParams({
       grant_type: "password", username: env("EIGHT_SLEEP_EMAIL"),
       password: env("EIGHT_SLEEP_PASSWORD"),
-      client_id: eightClientId, client_secret: eightClientSecret,
+      client_id: env("EIGHT_SLEEP_CLIENT_ID"), client_secret: env("EIGHT_SLEEP_CLIENT_SECRET"),
     }),
   }, "eight_login");
   const headers = {

@@ -12,8 +12,7 @@ from home import home
 AUTH_URL = "https://auth-api.8slp.net/v1/tokens"
 CLIENT_API = "https://client-api.8slp.net/v1"
 APP_API = "https://app-api.8slp.net/v1"
-CLIENT_ID = "0894c7f33bb94800a03f1f4df13a4f38"
-CLIENT_SECRET = "f0954a3ed5763ba3d06834c73731a32f15f168f47d4f164751275def86db0c76"
+
 def session_path() -> Path:
     return home() / "eight_session.json"
 
@@ -31,8 +30,8 @@ def login() -> dict:
             "grant_type": "password",
             "username": os.environ["EIGHT_SLEEP_EMAIL"],
             "password": os.environ["EIGHT_SLEEP_PASSWORD"],
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
+            "client_id": os.environ["EIGHT_SLEEP_CLIENT_ID"],
+            "client_secret": os.environ["EIGHT_SLEEP_CLIENT_SECRET"],
         },
         headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "okhttp/4.9.3"},
         timeout=30,
