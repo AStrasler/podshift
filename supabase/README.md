@@ -44,11 +44,11 @@ in `supabase/migrations/podshift_runs_observability.sql`:
 | --- | --- |
 | `outcome` | `running`, then `applied`, `unscored`, or `error` |
 | `recovery` | WHOOP recovery score when one was read |
-| `offset` | 0, -5, or -10 |
+| `recovery_offset` | 0, -5, or -10. The HTTP body still calls this field `offset` |
 | `matched_before` | true when the three live smart levels already equaled the target before the PUT |
 | `expected` | the three target levels |
 | `before_levels` | the three live smart levels read before the PUT |
-| `error_code` | short failure reason. A failed write still stores offset, match, expected, and before levels when they were known |
+| `error_code` | short failure reason. A failed write still stores recovery_offset, match, expected, and before levels when they were known |
 
 `already_checked` is only the HTTP response for a date that was already claimed.
 The existing row is left alone. `already_at_target` is no longer written. Older
@@ -101,7 +101,8 @@ select net.http_post(
 
 Inspect the corresponding response in `net._http_response`. A dry run returns
 `dry_run` plus `score`, `offset`, `matched_before`, `expected`, and
-`before_levels`. It does not claim the date and does not PUT. Only after a
+`before_levels`. In that JSON, `offset` is the same number stored in the
+`recovery_offset` column. It does not claim the date and does not PUT. Only after a
 successful dry run, enable the scheduled job:
 
 ```sql

@@ -161,7 +161,7 @@ async function finish(date: string, outcome: string, detail: Observation, errorC
     await db`update podshift_private.runs set outcome = ${outcome},
       recovery = ${detail.score ?? null},
       error_code = ${errorCode ?? null},
-      offset = ${detail.offset ?? null},
+      recovery_offset = ${detail.offset ?? null},
       matched_before = ${detail.matched_before ?? null},
       expected = ${asJson(detail.expected)},
       before_levels = ${asJson(detail.before_levels)}
