@@ -38,7 +38,7 @@ Power is left alone. If that write unexpectedly changes the power state, the pre
 
 ## Schedulers
 
-Primary: Supabase Edge Function `podshift-fallback`, 9:25 p.m. America/Chicago. pg_cron fires at 02:25 and 03:25 UTC and the SQL predicate keeps the call that falls at 21:00 Chicago. The function inserts `podshift_private.runs` for that Chicago date before it calls WHOOP or Eight Sleep. A second call the same date returns `already_checked` and does not write. After a scored recovery it always PUTs `bedTimeLevel`, `initialSleepLevel`, and `finalSleepLevel`. If those levels already matched, the row still says `applied` and `matched_before` is true. The row also stores `offset`, `expected`, and `before_levels` after `supabase/migrations/podshift_runs_observability.sql` is applied.
+Primary: Supabase Edge Function `podshift-fallback`, 9:25 p.m. America/Chicago. pg_cron fires at 02:25 and 03:25 UTC and the SQL predicate keeps the call that falls at 21:00 Chicago. The function inserts `podshift_private.runs` for that Chicago date before it calls WHOOP or Eight Sleep. A second call the same date returns `already_checked` and does not write. After a scored recovery it always PUTs `bedTimeLevel`, `initialSleepLevel`, and `finalSleepLevel`. If those levels already matched, the row still says `applied` and `matched_before` is true. The row also stores `recovery_offset`, `expected`, and `before_levels` after `supabase/migrations/podshift_runs_observability.sql` is applied. The HTTP body still calls the offset field `offset`.
 
 Pause the nightly function:
 

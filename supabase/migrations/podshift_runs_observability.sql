@@ -5,13 +5,15 @@
 -- Historical already_at_target rows are left as they are; new nights do not
 -- use that outcome.
 
+-- recovery_offset, not offset: OFFSET is a reserved keyword and the
+-- ADD COLUMN fails with SQLSTATE 42601 if the column is named offset.
 alter table podshift_private.runs
-  add column if not exists offset integer,
+  add column if not exists recovery_offset integer,
   add column if not exists matched_before boolean,
   add column if not exists expected jsonb,
   add column if not exists before_levels jsonb;
 
-comment on column podshift_private.runs.offset is
+comment on column podshift_private.runs.recovery_offset is
   'Recovery offset applied to the green-day baseline: 0, -5, or -10.';
 comment on column podshift_private.runs.matched_before is
   'True when the three live smart levels already equaled the target before the nightly PUT.';
