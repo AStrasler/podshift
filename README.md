@@ -4,7 +4,11 @@ Personal bridge from WHOOP recovery to an Eight Sleep Pod. Once a night it reads
 
 This repository is public so WHOOP can load [PRIVACY.md](PRIVACY.md). Do not commit `.env`, session files, or `baseline.json`.
 
-Eight Sleep has no official public API. The client talks to the same cloud endpoints the mobile app uses. Those endpoints can change without notice.
+Eight Sleep has no official public API. The clients talk to the same cloud endpoints the mobile app uses. Those endpoints can change without notice.
+
+Python (`apply.py` and `eight_status.py`) uses [pyEight](podshift/pyeight/VENDORED.md). The copy in this repo is the newer client vendored from [lukas-clarke/eight_sleep](https://github.com/lukas-clarke/eight_sleep) (`30093a3`, pyEight files through 2026-08-29), not the older standalone [lukas-clarke/pyEight](https://github.com/lukas-clarke/pyEight) (`d394d454`, 2025-07-15). The Home Assistant tree is not a pip package, so it is vendored. It keeps that library's built-in app client id and secret. Eight Sleep does not issue developer credentials. Python reads and writes `https://app-api.8slp.net/v1/users/{userId}/temperature`, which is pyEight's Autopilot route. The edge function still uses `/temperature/pod`.
+
+The Supabase edge function is still the hand-rolled client. This stage does not change it. A later change can move that function after the Python path has been proven.
 
 ## What triggers it
 
@@ -88,8 +92,6 @@ Required environment variables:
 | `WHOOP_CLIENT_SECRET` | WHOOP developer app client secret |
 | `EIGHT_SLEEP_EMAIL` | Eight Sleep account email |
 | `EIGHT_SLEEP_PASSWORD` | Eight Sleep account password |
-| `EIGHT_SLEEP_CLIENT_ID` | Eight Sleep OAuth client id. Must be set outside git |
-| `EIGHT_SLEEP_CLIENT_SECRET` | Eight Sleep OAuth client secret. Must be set outside git |
 
 Optional:
 
@@ -99,6 +101,8 @@ Optional:
 | `PODSHIFT_HOME` | Directory for tokens, baseline, and `last_run.json` |
 | `PODSHIFT_DISABLED` | `1`, `true`, or `yes` skips the Pod write |
 | `PODSHIFT_AWAY` | `1`, `true`, or `yes` skips the Pod write while away. Unset does nothing |
+| `EIGHT_SLEEP_CLIENT_ID` | Optional Python override. Unset uses pyEight's built-in app client id. Still required by the Supabase function |
+| `EIGHT_SLEEP_CLIENT_SECRET` | Optional Python override. Unset uses pyEight's built-in app client secret. Still required by the Supabase function |
 
 WHOOP app scopes: `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, `read:profile`, `read:body_measurement`. Request `offline` in the authorize URL. It is not a checkbox on the app form. Privacy policy URL for that app is the `PRIVACY.md` file in this repo.
 
@@ -144,11 +148,10 @@ Access tokens expire in about an hour. `apply.py` refreshes them. Reconnect only
 
 ## Reconnect Eight Sleep
 
-There is no separate OAuth app. Login uses the account email and password, plus `EIGHT_SLEEP_CLIENT_ID` and `EIGHT_SLEEP_CLIENT_SECRET`. Both client values must be set outside git.
+Python logs in with `EIGHT_SLEEP_EMAIL` and `EIGHT_SLEEP_PASSWORD` through pyEight on each run. There is no separate OAuth app, and `apply.py` does not read or write `eight_session.json`. Leave client id and secret unset unless you need to override the library defaults. The Supabase function still expects `EIGHT_SLEEP_CLIENT_ID` and `EIGHT_SLEEP_CLIENT_SECRET` in that project's secrets.
 
 1. Put the current password in `EIGHT_SLEEP_PASSWORD`.
-2. Delete `$PODSHIFT_HOME/eight_session.json`.
-3. Run `podshift/eight_status.py` or `apply.py --dry-run`. A 401 on the next real run also triggers a fresh login.
+2. Run `podshift/eight_status.py` or `apply.py --dry-run`.
 
 ## Tests
 
@@ -156,4 +159,4 @@ There is no separate OAuth app. Login uses the account email and password, plus 
 cd podshift && ../.venv/bin/python -m unittest test_levels.py
 ```
 
-The unit tests do not call WHOOP or Eight Sleep. `--dry-run` is the live read-only check.
+The unit tests do not call WHOOP or Eight Sleep. They cover the offset bands and the local dry-run path. `--dry-run` is the live read-only check.

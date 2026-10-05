@@ -2,12 +2,14 @@
 name: Podshift
 description: Read the owner's Whoop recovery and shift Eight Sleep Pod temperature before bed. Use for Whoop login, recovery checks, and Pod temperature changes.
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Podshift
 
 Personal controller. Tokens for the local scripts live in `$PODSHIFT_HOME` (`/workspace/.podshift` on this agent, otherwise `~/.podshift`). Never print client secrets, access tokens, or refresh tokens. Set `PODSHIFT_DISABLED=1` to skip the Pod write from `apply.py`. Set `PODSHIFT_AWAY=1` to skip the local write while away from home; there is no location signal, and leaving it unset does not skip. The primary nightly scheduler is the Supabase Edge Function `podshift-fallback` at 9:25pm America/Chicago. It claims each Chicago date once and, on a scored night, always writes the three Autopilot levels from the green-day baseline plus the recovery offset, even when those levels already match. Record that match; do not skip it. Gamut (`Podshift bedtime`, 9:00pm) is deprecated and is not a coordination signal. The container fallback daemon is deprecated with it. Do not start it. Pause the Supabase job with `enabled = false` on `podshift_private.state`.
+
+Python `apply.py` uses the vendored pyEight client for Eight Sleep auth and Autopilot level reads and writes (`bedTimeLevel`, `initialSleepLevel`, `finalSleepLevel`). Email and password are the account secrets; pyEight supplies the app client credentials. The Supabase edge function is still hand-rolled until a later change.
 
 ## Whoop login
 
@@ -37,7 +39,9 @@ Baseline levels live in `/workspace/.podshift/baseline.json`. Offsets are comput
 
 Bands: 67–100 offset 0, 34–66 offset -5, 0–33 offset -10. Skip the write when recovery is missing, unscored, or still calibrating.
 
+Python needs `requests` plus pyEight's `aiohttp`, `httpx`, and `python-dateutil`.
+
 ```bash
-uv run --env-file /workspace/.env --with requests python3 /workspace/.claude/skills/podshift/apply.py --dry-run
-uv run --env-file /workspace/.env --with requests python3 /workspace/.claude/skills/podshift/apply.py
+uv run --env-file /workspace/.env --with requests --with aiohttp --with httpx --with python-dateutil python3 /workspace/.claude/skills/podshift/apply.py --dry-run
+uv run --env-file /workspace/.env --with requests --with aiohttp --with httpx --with python-dateutil python3 /workspace/.claude/skills/podshift/apply.py
 ```

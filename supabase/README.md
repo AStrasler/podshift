@@ -121,3 +121,4 @@ completed before the response failed.
 - The function does not coordinate with Gamut or with `apply.py`. If a deprecated Gamut job or a manual `apply.py` runs the same night, both can write the same target. Leave Gamut off.
 - WHOOP and Eight Sleep API behavior may change.
 - Secrets must be supplied to this project before activation. Do not commit them.
+- This function still uses the hand-rolled Eight Sleep client, including `EIGHT_SLEEP_CLIENT_ID` and `EIGHT_SLEEP_CLIENT_SECRET`. Python `apply.py` has moved to pyEight. Do not assume this function picked up that change.

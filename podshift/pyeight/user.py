@@ -1,0 +1,1422 @@
+"""
+pyeight.user
+~~~~~~~~~~~~~~~~~~~~
+Provides user data for Eight Sleep
+Copyright (c) 2022-2023 <https://github.com/lukas-clarke/pyEight>
+Licensed under the MIT license.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import logging
+import statistics
+from typing import TYPE_CHECKING, Any
+
+from .constants import APP_API_URL, DATE_FORMAT, DATE_TIME_ISO_FORMAT, CLIENT_API_URL, POSSIBLE_SLEEP_STAGES
+from .exceptions import RequestError
+from .util import heating_level_to_temp
+
+if TYPE_CHECKING:
+    from .eight import EightSleep
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class EightUser:  # pylint: disable=too-many-public-methods
+    """Class for handling data of each eight user."""
+
+    def __init__(self, device: "EightSleep", user_id: str, side: str):
+        """Initialize user class."""
+        self.device = device
+        self.user_id = user_id
+        self.side = side
+        self._user_profile: dict[str, Any] = {}
+        self._base_data: dict[str, Any] = {}
+        self.trends: list[dict[str, Any]] = []
+        self.alarms: list[dict[str, Any]] = []
+        self.bedtime_schedules: list[dict[str, Any]] = []
+        self.schedule_type: str | None = None
+        self.routines: list[dict[str, Any]] = []  # Kept for backward compat, always empty now
+        self.smart_schedule: dict[str, Any] | None = None
+        self.next_alarm = None
+        self.next_alarm_id = None
+        self.snooze_minutes: int = 9
+        self.bed_state_type = None
+        self.current_side_temp = None
+        self.target_heating_temp = None
+        self._player_state: dict | None = None
+        self._audio_tracks: list[dict] = []
+        self._pillow_data: dict[str, Any] | None = None
+
+    def get_autopilot_target_temp(self, unit: str = "c") -> float | None:
+        """Return the temperature that Autopilot (smart schedule) is currently targeting."""
+        if not self.smart_schedule:
+            return None
+        # bedTimeLevel seems to be the primary target for the active sleep session
+        level = self.smart_schedule.get("bedTimeLevel")
+        if level is None:
+            return None
+        try:
+            return heating_level_to_temp(float(level), unit)
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _clean(value: Any) -> Any:
+        """Return None for the literal "None" the API sends for absent values."""
+        return None if value == "None" else value
+
+    def _get_trend(self, trend_num: int, keys: str | tuple[str, ...]) -> Any:
+        """Get trend value for specified key."""
+        if len(self.trends) < trend_num + 1:
+            return None
+
+        data_source = self.trends[-(trend_num + 1)] # Use a different variable name to avoid confusion
+        if isinstance(keys, str):
+            value = data_source.get(keys)
+            return None if value == "None" else value
+
+        # Traverse the keys
+        current_data = data_source
+        for key in keys[:-1]:
+            if not isinstance(current_data, dict): # Ensure current_data is a dict before .get
+                return None
+            current_data = current_data.get(key)
+            if current_data is None: # Stop if any intermediate key is missing
+                return None
+            # If an intermediate key's value is "None" string, treat as actual None for traversal
+            if current_data == "None":
+                return None
+
+        if not isinstance(current_data, dict): # Final check before the last .get
+            # If current_data itself became "None" string and was the target (e.g. keys has only one element after initial data_source)
+            # This case should be handled by the loop's "if current_data == "None":" check if keys has more than one element.
+            # If keys had only one element, this path isn't taken.
+            # However, if the expected structure is dict but we got "None" string, it should be None.
+            return None
+        value = current_data.get(keys[-1])
+        return None if value == "None" else value
+
+    def _get_quality_score(self, trend_num: int, key: str) -> Any:
+        """Get quality score for specified key."""
+        return self._get_trend(trend_num, ("sleepQualityScore", key, "score"))
+
+    def _get_routine_score(self, trend_num: int, key: str) -> Any:
+        """Get routine score for specified key."""
+        return self._get_trend(trend_num, ("sleepRoutineScore", key, "score"))
+
+    def _get_sleep_score(self, trend_num: int) -> int | None:
+        """Return sleep score for a given trend."""
+        return self._get_trend(trend_num, "score")
+
+    def _trend_timeseries(self) -> dict[str, Any] | None:
+        """Return the timeseries for the latest trend."""
+        if not self.trends:
+            return None
+        sessions = self.trends[-1].get("sessions") or [{}]
+        return sessions[-1].get("timeseries", {})
+
+    def _get_current_trend_property_value(self, key: str) -> int | float | None:
+        """Get current property from trends."""
+        if (
+            not (timeseries_data := self._trend_timeseries())
+            or not timeseries_data.get(key)
+        ):
+            return None
+        return self._clean(timeseries_data[key][-1][1])
+
+    def _session_date(self, trend_num: int) -> datetime | None:
+        """Get session date for given trend."""
+        if (
+            len(self.trends) < trend_num + 1
+            or (session_date := self.trends[-(trend_num + 1)].get("presenceStart")) is None
+        ):
+            return None
+        return self.device.convert_string_to_datetime(session_date)
+
+    def _sleep_breakdown(self, trend_num: int) -> dict[str, Any] | None:
+        """Return durations of sleep stages for given session."""
+        if len(self.trends) < (trend_num + 1):
+            return None
+        # An away side reports a session with no durations at all, so the
+        # subtraction below has to tolerate either half being absent instead
+        # of raising TypeError before any sensor is reached (#52).
+        presence = self._get_trend(trend_num, "presenceDuration")
+        slept = self._get_trend(trend_num, "sleepDuration")
+        awake = presence - slept if None not in (presence, slept) else None
+        breakdown = {
+            "light": self._get_trend(trend_num, "lightDuration"),
+            "deep": self._get_trend(trend_num, "deepDuration"),
+            "rem": self._get_trend(trend_num, "remDuration"),
+            "awake": awake,
+        }
+        breakdown = {k: v for k, v in breakdown.items() if v is not None}
+        return breakdown or None
+
+    def _session_processing(self, trend_num: int) -> bool | None:
+        """Return processing state of given session."""
+        if len(self.trends) < trend_num + 1:
+            return None
+        return self.trends[-(trend_num + 1)].get("processing", False)
+
+    def _get_alarm(self, alarm_id: str) -> dict[str, Any]:
+        """Get alarm data for the specified ID from the new alarms API."""
+        for alarm in self.alarms:
+            if alarm["id"] == alarm_id:
+                return alarm
+        raise Exception(f"Alarm with ID {alarm_id} not found")
+
+    def get_alarm_enabled(self, id: str | None) -> bool:
+        """Get alarm enabled for the specified ID.
+        If no ID is specified, the next alarm will be used."""
+        if id is None:
+            if self.next_alarm_id:
+                id = self.next_alarm_id
+            else:
+                return False
+
+        for alarm in self.alarms:
+            if alarm["id"] == id:
+                return alarm.get("enabled", False)
+
+        _LOGGER.warning("Alarm with ID %s not found in alarms list", id)
+        return False
+
+    @property
+    def user_profile(self) -> dict[str, Any] | None:
+        """Return userdata."""
+        return self._user_profile
+
+    @property
+    def base_data(self) -> dict[str, Any]:
+        """Return the base data."""
+        return self._base_data
+
+    @property
+    def base_data_for_side(self) -> dict[str, Any]:
+        """Return the base data for the user's side.
+        Currently the data is identical for both sides."""
+        return self.base_data.get(self.corrected_side_for_key, {})
+
+    @property
+    def base_preset(self) -> str | None:
+        """Return the base preset.
+        Currently these are sleep, relaxing and reading."""
+        return self.base_data_for_side.get("preset", {}).get("name")
+
+    @property
+    def leg_angle(self) -> int:
+        """Return the base leg angle."""
+        return self.base_data_for_side.get("leg", {}).get("currentAngle", 0)
+
+    @property
+    def torso_angle(self) -> int:
+        """Return the base torso angle."""
+        return self.base_data_for_side.get("torso", {}).get("currentAngle", 0)
+
+    @property
+    def in_snore_mitigation(self) -> bool:
+        """Return the snore mitigation state."""
+        return self.base_data_for_side.get("inSnoreMitigation", False)
+
+    @property
+    def bed_presence(self) -> bool:
+        """Return true/false for bed presence.
+
+        Uses heart rate trend data as the primary signal. When HR data goes
+        stale (10-30 min old), falls back to checking the device-level bed
+        state type. This prevents false negatives when the Eight Sleep cloud
+        API temporarily stops updating trend data during an active sleep
+        session.
+
+        The fallback only extends an existing session (recent HR data that
+        went stale). It does not trigger presence for pre-warming schedules
+        where no HR data was recorded in the current session.
+        """
+        timeseries = self._trend_timeseries()
+        if not timeseries or not timeseries.get("heartRate"):
+            return False
+
+        heart_rate_entry = timeseries["heartRate"][-1]
+        _LOGGER.debug(f"Last heart rate: {heart_rate_entry} for {self.user_id}")
+        heart_rate_time = datetime.fromisoformat(heart_rate_entry[0].replace('Z', '+00:00'))
+
+        age_seconds = (datetime.now(timezone.utc) - heart_rate_time).total_seconds()
+
+        # Primary: fresh HR data confirms presence
+        if age_seconds < 600:
+            return True
+
+        # Fallback: HR data is 10-30 min stale, but the device reports an
+        # active sleep session. The cloud trend API likely lagged -- keep
+        # presence True to avoid false negatives.
+        # This does NOT trigger for pre-warming (last HR would be from a
+        # previous night, age >> 1800) or when no HR was ever recorded.
+        if age_seconds < 1800:
+            state_type = self.bed_state_type
+            if state_type and state_type.startswith("smart:"):
+                _LOGGER.debug(
+                    f"HR stale ({age_seconds:.0f}s) but device in '{state_type}' "
+                    f"for {self.user_id} -- extending presence"
+                )
+                return True
+
+        return False
+
+    @property
+    def target_heating_level(self) -> int | None:
+        """Return target heating/cooling level."""
+        return self.device.device_data.get(
+            f"{self.corrected_side_for_key}TargetHeatingLevel"
+        )
+
+    @property
+    def heating_level(self) -> int | None:
+        """Return heating/cooling level."""
+        key = f"{self.corrected_side_for_key}HeatingLevel"
+        level = self.device.device_data.get(key)
+
+        if level is not None:
+            return level
+
+        for data in self.device.device_data_history:
+            level = data.get(key)
+            if level is not None:
+                return level
+
+    @property
+    def corrected_side_for_key(self) -> str:
+        if self.side is None:
+            _LOGGER.warning(f"User {self.user_id} has no side information; defaulting to 'left' for key access. This might lead to unexpected behavior.")
+            return "left" # Defaulting to 'left' as a fallback
+        if self.side.lower() == "solo":
+            return "left"
+        else:
+            return self.side
+
+    def past_heating_level(self, num) -> int:
+        """Return a heating level from the past."""
+        if num > 9 or len(self.device.device_data_history) < num + 1:
+            return 0
+
+        return self.device.device_data_history[num].get(
+            f"{self.corrected_side_for_key}HeatingLevel", 0
+        )
+
+    def _now_heating_or_cooling(self, target_heating_level_check: bool) -> bool | None:
+        """Return true/false if heating or cooling is currently happening."""
+        key = f"{self.corrected_side_for_key}NowHeating"
+        if (
+            self.target_heating_level is None
+            or (target := self.device.device_data.get(key)) is None
+        ):
+            return None
+        return target and target_heating_level_check
+
+    @property
+    def now_heating(self) -> bool | None:
+        """Return current heating state."""
+        level = self.target_heating_level
+        return self._now_heating_or_cooling(level is not None and level > 0)
+
+    @property
+    def now_cooling(self) -> bool | None:
+        """Return current cooling state."""
+        level = self.target_heating_level
+        return self._now_heating_or_cooling(level is not None and level < 0)
+
+    @property
+    def heating_remaining(self) -> int | None:
+        """Return seconds of heat/cool time remaining."""
+        return self.device.device_data.get(
+            f"{self.corrected_side_for_key}HeatingDuration"
+        )
+
+    @property
+    def last_seen(self) -> str | None:
+        """Return mattress last seen time.
+
+        These values seem to be rarely updated correctly in the API.
+        Don't expect accurate results from this property.
+        """
+        if not (
+            last_seen := self.device.device_data.get(
+                f"{self.corrected_side_for_key}PresenceEnd"
+            )
+        ):
+            return None
+        return datetime.fromtimestamp(int(last_seen)).strftime(DATE_TIME_ISO_FORMAT)
+
+    @property
+    def heating_values(self) -> dict[str, Any]:
+        """Return a dict of all the current heating values."""
+        return {
+            "level": self.heating_level,
+            "target": self.target_heating_level,
+            "active": self.now_heating,
+            "remaining": self.heating_remaining,
+            "last_seen": self.last_seen,
+        }
+
+    @property
+    def current_session_date(self) -> datetime | None:
+        """Return date/time for start of last session data."""
+        return self._session_date(0)
+
+    @property
+    def current_session_processing(self) -> bool | None:
+        """Return processing state of current session."""
+        return self._session_processing(0)
+
+    @property
+    def current_sleep_stage(self) -> str | None:
+        """Return sleep stage for in-progress session."""
+        if not self.trends:
+            return None
+
+        current_trend = self.trends[-1]
+        sessions = current_trend.get('sessions', [])
+
+        if not sessions:
+            return None
+
+        current_session = sessions[-1]
+        stages = current_session.get('stages', [])
+
+        if not stages:
+            return None
+
+        # API now always has an awake state last in the dict
+        # so always pull the second to last stage while we are
+        # in a processing state
+        if self.current_session_processing:
+            stage = stages[-2].get('stage') if len(stages) >= 2 else None
+        else:
+            stage = stages[-1].get('stage')
+
+        return stage
+
+    @property
+    def current_sleep_score(self) -> int | None:
+        """Return sleep score for in-progress session."""
+        return self._get_sleep_score(0)
+
+    @property
+    def current_sleep_fitness_score(self) -> int | None:
+        """Return sleep fitness score for latest session."""
+        # return self._get_trend(0, ("sleepFitnessScore", "total"))
+        return self._get_trend(0, "score")
+
+    @property
+    def current_sleep_quality_score(self) -> int | None:
+        return self._get_trend(0, ("sleepQualityScore", "total"))
+
+    @property
+    def current_sleep_routine_score(self) -> int | None:
+        return self._get_trend(0, ("sleepRoutineScore", "total"))
+
+    @property
+    def current_sleep_duration_score(self) -> int | None:
+        """Return sleep duration score for latest session."""
+        return self._get_quality_score(0, "sleepDurationSeconds")
+
+    @property
+    def current_latency_asleep_score(self) -> int | None:
+        """Return latency asleep score for latest session."""
+        return self._get_routine_score(0, "latencyAsleepSeconds")
+
+    @property
+    def time_slept(self) -> int | None:
+        return self._get_trend(0, ("sleepDuration"))
+
+    @property
+    def presence_start(self):
+        timestamp = self._get_trend(0, "presenceStart")
+        if timestamp:
+            return self.device.convert_string_to_datetime(timestamp)
+
+    @property
+    def presence_end(self):
+        timestamp = self._get_trend(0, "presenceEnd")
+        if timestamp:
+            return self.device.convert_string_to_datetime(timestamp)
+
+    @property
+    def current_latency_out_score(self) -> int | None:
+        """Return latency out score for latest session."""
+        return self._get_routine_score(0, "latencyOutSeconds")
+
+    @property
+    def current_hrv(self) -> float | None:
+        """Return wakeup consistency score for latest session."""
+        return self._get_trend(0, ("sleepQualityScore", "hrv", "current"))
+
+    @property
+    def current_breath_rate(self) -> float | None:
+        """Return wakeup consistency score for latest session."""
+        return self._get_trend(0, ("sleepQualityScore", "respiratoryRate", "current"))
+
+    @property
+    def current_wakeup_consistency_score(self) -> int | None:
+        """Return wakeup consistency score for latest session."""
+        return self._get_routine_score(0, "wakeupConsistency")
+
+    @property
+    def current_fitness_session_date(self) -> str | None:
+        """Return date/time for start of last session data."""
+        return self._get_trend(0, "day")
+
+    @property
+    def current_sleep_breakdown(self) -> dict[str, Any] | None:
+        """Return durations of sleep stages for in-progress session."""
+        return self._sleep_breakdown(0)
+
+    @property
+    def current_bed_temp(self) -> int | float | None:
+        """Return current bed temperature for in-progress session."""
+        # return self._get_current_interval_property_value("tempBedC")
+        return self.current_side_temp
+
+    @property
+    def current_room_temp(self) -> int | float | None:
+        """Return current room temperature for in-progress session."""
+        timeseries = self._trend_timeseries()
+        if timeseries and timeseries.get("tempRoomC"):
+            return self._clean(timeseries["tempRoomC"][-1][1])
+        return None
+
+    @property
+    def current_tnt(self) -> int | None:
+        """Return current toss & turns for in-progress session."""
+        return self._get_trend(0, "tnt")
+
+    @property
+    def current_resp_rate(self) -> int | float | None:
+        """Return current respiratory rate for in-progress session."""
+        return self._get_trend(0, ("sleepQualityScore", "respiratoryRate", "current"))
+
+    @property
+    def current_heart_rate(self) -> int | float | None:
+        """Return current heart rate for in-progress session."""
+        timeseries = self._trend_timeseries()
+        if timeseries and timeseries.get("heartRate"):
+            return self._clean(timeseries["heartRate"][-1][1])
+        return None
+
+    @property
+    def current_values(self) -> dict[str, Any]:
+        """Return a dict of all the 'current' parameters."""
+        return {
+            "date": self.current_session_date,
+            "score": self.current_sleep_score,
+            "stage": self.current_sleep_stage,
+            "breakdown": self.current_sleep_breakdown,
+            "tnt": self.current_tnt,
+            "bed_temp": self.current_bed_temp,
+            "room_temp": self.current_room_temp,
+            "resp_rate": self.current_resp_rate,
+            "heart_rate": self.current_heart_rate,
+            "processing": self.current_session_processing,
+        }
+
+    @property
+    def current_fitness_values(self) -> dict[str, Any]:
+        """Return a dict of all the 'current' fitness score parameters."""
+        return {
+            "date": self.current_fitness_session_date,
+            "score": self.current_sleep_fitness_score,
+            "duration": self.current_sleep_duration_score,
+            "asleep": self.current_latency_asleep_score,
+            "out": self.current_latency_out_score,
+            "wakeup": self.current_wakeup_consistency_score,
+        }
+
+    @property
+    def last_session_date(self) -> datetime | None:
+        """Return date/time for start of last session data."""
+        return self._session_date(1)
+
+    @property
+    def last_session_processing(self) -> bool | None:
+        """Return processing state of current session."""
+        return self._session_processing(1)
+
+    @property
+    def last_sleep_score(self) -> int | None:
+        """Return sleep score from last complete sleep session."""
+        return self._get_sleep_score(1)
+
+    @property
+    def last_sleep_fitness_score(self) -> int | None:
+        """Return sleep fitness score for previous sleep session."""
+        return self._get_trend(1, ("sleepFitnessScore", "total"))
+
+    @property
+    def last_sleep_duration_score(self) -> int | None:
+        """Return sleep duration score for previous session."""
+        return self._get_quality_score(1, "sleepDurationSeconds")
+
+    @property
+    def last_latency_asleep_score(self) -> int | None:
+        """Return latency asleep score for previous session."""
+        return self._get_routine_score(1, "latencyAsleepSeconds")
+
+    @property
+    def last_latency_out_score(self) -> int | None:
+        """Return latency out score for previous session."""
+        return self._get_routine_score(1, "latencyOutSeconds")
+
+    @property
+    def last_wakeup_consistency_score(self) -> int | None:
+        """Return wakeup consistency score for previous session."""
+        return self._get_routine_score(1, "wakeupConsistency")
+
+    @property
+    def last_fitness_session_date(self) -> str | None:
+        """Return date/time for start of previous session data."""
+        return self._get_trend(1, "day")
+
+    @property
+    def last_sleep_breakdown(self) -> dict[str, Any] | None:
+        """Return durations of sleep stages for last complete session."""
+        return self._sleep_breakdown(1)
+
+    @property
+    def last_bed_temp(self) -> int | float | None:
+        """Return avg bed temperature for last session."""
+        return self._get_trend(1, ("sleepQualityScore", "tempBedC", "average"))
+
+    @property
+    def last_room_temp(self) -> int | float | None:
+        """Return avg room temperature for last session."""
+        return self._get_trend(1, ("sleepQualityScore", "tempRoomC", "average"))
+
+    @property
+    def last_tnt(self) -> int | None:
+        """Return toss & turns for last session."""
+        return self._get_trend(1, "tnt")
+
+    @property
+    def last_resp_rate(self) -> int | float | None:
+        """Return avg respiratory rate for last session."""
+        return self._get_trend(1, ("sleepQualityScore", "respiratoryRate", "average"))
+
+    @property
+    def last_heart_rate(self) -> int | float | None:
+        """Return avg heart rate for last session."""
+        return self._get_trend(1, ("sleepQualityScore", "heartRate", "average"))
+
+    @property
+    def last_values(self) -> dict[str, Any]:
+        """Return a dict of all the 'last' parameters."""
+        return {
+            "date": self.last_session_date,
+            "score": self.last_sleep_score,
+            "breakdown": self.last_sleep_breakdown,
+            "tnt": self.last_tnt,
+            "bed_temp": self.last_bed_temp,
+            "room_temp": self.last_room_temp,
+            "resp_rate": self.last_resp_rate,
+            "heart_rate": self.last_heart_rate,
+            "processing": self.last_session_processing,
+        }
+
+    @property
+    def last_fitness_values(self) -> dict[str, Any]:
+        """Return a dict of all the 'last' fitness score parameters."""
+        return {
+            "date": self.last_fitness_session_date,
+            "score": self.last_sleep_fitness_score,
+            "duration": self.last_sleep_duration_score,
+            "asleep": self.last_latency_asleep_score,
+            "out": self.last_latency_out_score,
+            "wakeup": self.last_wakeup_consistency_score,
+        }
+
+    def trend_sleep_score(self, date: str) -> int | None:
+        """Return trend sleep score for specified date."""
+        return next(
+            (day.get("score") for day in self.trends if day.get("day") == date),
+            None,
+        )
+
+    def sleep_fitness_score(self, date: str) -> int | None:
+        """Return sleep fitness score for specified date."""
+        return next(
+            (
+                day.get("sleepFitnessScore", {}).get("total")
+                for day in self.trends
+                if day.get("day") == date
+            ),
+            None,
+        )
+
+    async def get_user_side(self) -> str:
+        """Returns the side that the current user is set to"""
+        url = CLIENT_API_URL + f"/users/{self.user_id}/current-device"
+        data = await self.device.api_request("GET", url, return_json=True)
+        return data["side"]
+
+    def heating_stats(self) -> None:
+        """Calculate some heating data stats."""
+        local_5 = []
+        local_10 = []
+
+        for i in range(0, 10):
+            if (level := self.past_heating_level(i)) is None:
+                continue
+            if level == 0:
+                _LOGGER.debug("Cant calculate stats yet...")
+                return
+            if i < 5:
+                local_5.append(level)
+            local_10.append(level)
+
+        _LOGGER.debug("%s Heating History: %s", self.side, local_10)
+
+        try:
+            # Average of 5min on the history dict.
+            fiveminavg = statistics.mean(local_5)
+            tenminavg = statistics.mean(local_10)
+            _LOGGER.debug("%s Heating 5 min avg: %s", self.side, fiveminavg)
+            _LOGGER.debug("%s Heating 10 min avg: %s", self.side, tenminavg)
+
+            # Standard deviation
+            fivestdev = statistics.stdev(local_5)
+            tenstdev = statistics.stdev(local_10)
+            _LOGGER.debug("%s Heating 5 min stdev: %s", self.side, fivestdev)
+            _LOGGER.debug("%s Heating 10 min stdev: %s", self.side, tenstdev)
+
+            # Variance
+            fivevar = statistics.variance(local_5)
+            tenvar = statistics.variance(local_10)
+            _LOGGER.debug("%s Heating 5 min variance: %s", self.side, fivevar)
+            _LOGGER.debug("%s Heating 10 min variance: %s", self.side, tenvar)
+        except statistics.StatisticsError:
+            _LOGGER.debug("Cant calculate stats yet...")
+
+    async def update_user(self) -> None:
+        """Update all user data."""
+        self.side = await self.get_user_side()
+
+        now = datetime.today()
+        start = now - timedelta(days=1)
+        end = now + timedelta(days=1)
+
+        await self.update_trend_data(
+            start.strftime(DATE_FORMAT), end.strftime(DATE_FORMAT)
+        )
+        await self.update_routines_data()
+
+        self.bed_state_type = await self.get_bed_state_type()
+
+        # Update temperature data (current temp, smart schedule, etc.)
+        await self._update_temperature_data()
+        await self.update_pillow_data()
+
+        if self.target_heating_level is None:
+            self.target_heating_temp = None
+        else:
+            self.target_heating_temp = heating_level_to_temp(
+                self.target_heating_level, "c"
+            )
+
+    # ── Pillow (Pod 5 accessory, its own temperature-controlled device) ────────
+    #
+    # The per-specialization route is
+    #   GET|PUT app-api /v1/users/{userId}/temperature/{pod|pillow|all}
+    # and answers `{"devices": [{"device": {...}, "currentLevel": ..., ...}]}`.
+    # Note this is a different shape from plain /temperature, which is why the
+    # pod keeps using its own path untouched.
+
+    @property
+    def pillow_device(self) -> dict[str, Any]:
+        """Return this user's pillow entry from the last fetch, or an empty dict.
+
+        A shared bed can carry a pillow per side, so the side is matched rather
+        than taking devices[0] -- which is the exact mistake #138 documents in
+        household.get_devices(). Falls back to the single entry when the payload
+        carries no side, so a solo bed still resolves.
+        """
+        # `/temperature/all` returns the pod too, on the same side, so filter by
+        # specialization before anything else or the pod answers as the pillow.
+        devices = [
+            entry
+            for entry in ((self._pillow_data or {}).get("devices") or [])
+            if (entry.get("device") or {}).get("specialization") == "pillow"
+        ]
+        if not devices:
+            return {}
+        mine = self.corrected_side_for_key
+        for entry in devices:
+            if (entry.get("device") or {}).get("side") == mine:
+                return entry
+        if len(devices) == 1 and not (devices[0].get("device") or {}).get("side"):
+            return devices[0]
+        _LOGGER.debug(
+            "No pillow on side %s for user %s (%d reported)",
+            mine, self.user_id, len(devices),
+        )
+        return {}
+
+    @property
+    def _pillow_belongs_to_this_bed(self) -> bool:
+        """Return whether the reported pillow sits on *this* config entry's bed.
+
+        The temperature route is scoped to the user, not the device, so an
+        account that administers several pods gets the same pillow back no
+        matter which bed asks. The Eight Sleep app forces the owner to be a
+        user on every pod they administer, so this is the ordinary multi-pod
+        family setup, not an edge case: without this check a Pod 4 grows a
+        phantom pillow belonging to the Pod 5 in another room.
+
+        `/temperature/all` returns the pod alongside the pillow, so the pod in
+        that same payload is what says which bed the pillow is part of.
+        """
+        my_device = self.device.device_id
+        if not my_device:
+            return False
+        for entry in (self._pillow_data or {}).get("devices") or []:
+            info = entry.get("device") or {}
+            if info.get("specialization") == "pod" and info.get("deviceId") == my_device:
+                return True
+        return False
+
+    @property
+    def has_pillow(self) -> bool:
+        """Return whether *this* bed reported a pillow on this user's side."""
+        return bool(self.pillow_device) and self._pillow_belongs_to_this_bed
+
+    @property
+    def pillow_level(self) -> int | None:
+        """Return the pillow's current level (-100..100), or None if absent."""
+        return self.pillow_device.get("currentLevel") if self.has_pillow else None
+
+    @property
+    def pillow_state(self) -> str | None:
+        """Return the pillow's state type, e.g. 'off' or 'smart:bedtime'."""
+        return (self.pillow_device.get("currentState") or {}).get("type")
+
+    @property
+    def pillow_is_on(self) -> bool:
+        """Return whether the pillow is actively heating or cooling."""
+        state = self.pillow_state
+        return bool(state) and state != "off"
+
+    async def update_pillow_data(self) -> None:
+        """Fetch the pillow's temperature state.
+
+        Uses `all` rather than `pillow` so the pod comes back in the same
+        payload: that is what tells us which bed the pillow belongs to, since
+        the route is scoped to the user and not to the device.
+
+        A bed without a pillow answers with no pillow entry, which is how
+        `has_pillow` stays False and no pillow entity is created.
+        """
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature/all"
+        try:
+            resp = await self.device.api_request("GET", url)
+            self._pillow_data = resp if isinstance(resp, dict) else None
+        except RequestError as err:
+            # Never let a pillow lookup abort the wider user update.
+            _LOGGER.debug("No pillow data for user %s: %s", self.user_id, err)
+            self._pillow_data = None
+
+    async def turn_on_pillow(self) -> None:
+        """Turn the pillow on, mirroring turn_on_side for the pod."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature/pillow"
+        await self.device.api_request(
+            "PUT", url, data={"currentState": {"type": "smart"}}
+        )
+
+    async def turn_off_pillow(self) -> None:
+        """Turn the pillow off."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature/pillow"
+        await self.device.api_request(
+            "PUT", url, data={"currentState": {"type": "off"}}
+        )
+
+    async def set_pillow_level(self, level: int, *, power_on: bool = True) -> None:
+        """Set the pillow level, powering it on first when needed.
+
+        Writing a level to a pillow that is off returns HTTP 200 and does
+        nothing at all, exactly like the pod, so the power-on has to come first
+        or the request is silently a no-op.
+        """
+        level = max(-100, min(100, level))
+        if power_on and not self.pillow_is_on:
+            await self.turn_on_pillow()
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature/pillow"
+        await self.device.api_request("PUT", url, data={"currentLevel": level})
+
+    async def _update_temperature_data(self) -> None:
+        """Fetch and update detailed temperature data including smart schedule."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        try:
+            resp = await self.device.api_request("GET", url)
+            if resp and isinstance(resp, dict):
+                # Update current side temp (from sensor)
+                level = resp.get("currentDeviceLevel")
+                if level is not None:
+                    self.current_side_temp = heating_level_to_temp(int(level), "c")
+                else:
+                    self.current_side_temp = None
+                
+                # Update smart schedule (Autopilot)
+                self.smart_schedule = resp.get("smart")
+                _LOGGER.debug(f"User {self.user_id} Smart Schedule: {self.smart_schedule}")
+
+                # Bedtime routines migrated here from the retired routines API:
+                # currentSchedule/nextSchedule carry time, days and startSettings
+                # (bed level, pillowBedtime, elevationPreset, audioSettings).
+                self.schedule_type = resp.get("scheduleType")
+                schedules: list[dict[str, Any]] = []
+                seen_ids: set[str] = set()
+                for key in ("currentSchedule", "nextSchedule"):
+                    sched = resp.get(key)
+                    sched_id = (sched or {}).get("id")
+                    if sched and sched_id and sched_id not in seen_ids:
+                        seen_ids.add(sched_id)
+                        schedules.append(sched)
+                self.bedtime_schedules = schedules
+
+        except Exception as e:
+            _LOGGER.warning(f"Error fetching temperature data for {self.user_id}: {e}")
+
+
+    async def set_bed_side(self, side) -> None:
+        side = str(side).lower()
+        if side not in ["solo", "left", "right"]:
+            raise Exception(f"Invalid side parameter passed in: {side}")
+        url = CLIENT_API_URL + f"/users/{self.user_id}/current-device"
+        data = {"id": str(self.device.device_id), "side": side}
+        _LOGGER.debug(f"User {self.user_id}: Setting bed side to '{side}' with payload {data}")
+        await self.device.api_request("PUT", url, data=data, return_json=False)
+        _LOGGER.debug(f"User {self.user_id}: Successfully set bed side to '{side}'")
+
+    async def get_bed_state_type(self) -> str:
+        """Gets the bed state."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        data = await self.device.api_request("GET", url)
+        return data["currentState"]["type"]
+
+    async def set_heating_level(self, level: int, duration: int = 0, *, power_on: bool = True) -> None:
+        """Update heating data, optionally powering on first."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        data_for_duration = {"timeBased": {"level": level, "durationSeconds": duration}}
+        data_for_level = {"currentLevel": level}
+        # Catch bad low inputs
+        level = max(-100, level)
+        # Catch bad high inputs
+        level = min(100, level)
+
+        if power_on:
+            await self.turn_on_side()
+        await self.device.api_request(
+            "PUT", url, data=data_for_level
+        )  # Set heating level before duration
+        await self.device.api_request("PUT", url, data=data_for_duration)
+
+    async def set_smart_heating_level(self, level: int, sleep_stage: str) -> None:
+        """Will set the temperature level at a smart sleep stage"""
+        if sleep_stage not in POSSIBLE_SLEEP_STAGES:
+            raise Exception(
+                f"Invalid sleep stage {sleep_stage}. Should be one of {POSSIBLE_SLEEP_STAGES}"
+            )
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        data = await self.device.api_request("GET", url)
+        sleep_stages_levels = data["smart"]
+        # Catch bad low inputs
+        level = max(-100, level)
+        # Catch bad high inputs
+        level = min(100, level)
+        sleep_stages_levels[sleep_stage] = level
+        data = {"smart": sleep_stages_levels}
+        await self.device.api_request("PUT", url, data=data)
+
+    async def increment_heating_level(self, offset: int) -> None:
+        """Increment heating level with offset"""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        current_level = await self.get_current_heating_level()
+        new_level = current_level + offset
+        # Catch bad low inputs
+        new_level = max(-100, new_level)
+        # Catch bad high inputs
+        new_level = min(100, new_level)
+
+        data_for_level = {"currentLevel": new_level}
+
+        await self.device.api_request("PUT", url, data=data_for_level)
+
+    async def get_current_heating_level(self) -> int:
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        resp = await self.device.api_request("GET", url)
+        return int(resp["currentLevel"])
+
+    async def get_current_device_level(self) -> int | None: # Return type can be None
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        try:
+            resp = await self.device.api_request("GET", url)
+            if resp and isinstance(resp, dict):
+                level = resp.get("currentDeviceLevel")
+                if level is not None:
+                    return int(level)
+            _LOGGER.debug(f"Could not determine current device level for user {self.user_id} from response: {resp}")
+            return None # Return None if data is not as expected
+        except ValueError as e: # Handles int() conversion error
+            _LOGGER.warning(f"ValueError converting current device level for user {self.user_id}: {e} - Response: {resp}")
+            return None
+        # RequestError will be raised by api_request if the call itself fails
+
+    async def prime_pod(self):
+        url = APP_API_URL + f"v1/devices/{self.device.device_id}/priming/tasks"
+        data_for_priming = {
+            "notifications": {"users": [self.user_id], "meta": "rePriming"}
+        }
+        await self.device.api_request("POST", url, data=data_for_priming)
+
+    async def turn_on_side(self):
+        """Turns on the side of the user"""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        data = {"currentState": {"type": "smart"}}
+        await self.device.api_request("PUT", url, data=data)
+
+    def _is_alarm_active(self) -> bool:
+        """Check if the next alarm is currently ringing or snoozed."""
+        if not self.next_alarm_id:
+            return False
+        try:
+            alarm = self._get_alarm(self.next_alarm_id)
+        except Exception:
+            return False
+        if alarm.get("snoozing", False):
+            return True
+        start = alarm.get("startTimestamp")
+        end = alarm.get("endTimestamp")
+        if not start or not end:
+            return False
+        now = datetime.now(timezone.utc)
+        try:
+            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return False
+        return start_dt <= now <= end_dt
+
+    async def alarm_snooze(self, snooze_minutes: int):
+        """Snoozes the user alarm for the specified minutes.
+        Only acts if the alarm is currently ringing or snoozed.
+
+        PUT /v1/users/{userId}/alarms/{alarmId}/snooze
+        Request: {"snoozeMinutes": 9, "ignoreDeviceErrors": false}
+        Response: 200 empty body (Content-Length: 0) or 409 if not ringing
+        """
+        if not self._is_alarm_active():
+            _LOGGER.debug("Alarm not currently active for %s, nothing to snooze", self.user_id)
+            return
+        url = APP_API_URL + f"v1/users/{self.user_id}/alarms/{self.next_alarm_id}/snooze"
+        data = {"snoozeMinutes": snooze_minutes, "ignoreDeviceErrors": False}
+        try:
+            await self.device.api_request("PUT", url, data=data, return_json=False)
+        except RequestError as err:
+            if "409" in str(err):
+                _LOGGER.debug("Alarm not currently ringing for %s, nothing to snooze", self.user_id)
+            else:
+                raise
+
+    async def alarm_stop(self):
+        """Stops the next user alarm. Uses dismiss endpoint (no separate stop in API)."""
+        await self.alarm_dismiss()
+
+    async def alarm_dismiss(self, alarm_id: str | None = None) -> bool:
+        """Dismisses the specified alarm (or next alarm if not specified).
+        Returns True if dismissed successfully, False if not ringing (409).
+
+        Accepts an explicit alarm_id to avoid a race condition where
+        self.next_alarm_id could change between the caller's decision to
+        dismiss and the actual API call (e.g. the coordinator refreshes
+        and flips to tomorrow's alarm mid-dismiss).
+
+        PUT /v1/users/{userId}/alarms/{alarmId}/dismiss
+        Request: {"ignoreDeviceErrors": false}
+        Response: 200 with alarm object (or 409 if alarm not ringing)
+        """
+        target_id = alarm_id or self.next_alarm_id
+        if not target_id:
+            _LOGGER.debug("No alarm ID to dismiss for %s", self.user_id)
+            return False
+        url = APP_API_URL + f"v1/users/{self.user_id}/alarms/{target_id}/dismiss"
+        data = {"ignoreDeviceErrors": False}
+        try:
+            await self.device.api_request("PUT", url, data=data)
+            return True
+        except RequestError as err:
+            if "409" in str(err):
+                _LOGGER.debug("Alarm not currently ringing for %s, nothing to dismiss", self.user_id)
+                return False
+            else:
+                raise
+
+    async def set_alarm_enabled(self, routine_id: str | None, alarm_id: str | None, enabled: bool) -> None:
+        """Enables or disables the alarm.
+        routine_id is ignored (kept for backward compat). Uses new alarms API.
+        Sends the full alarm object as required by the API.
+
+        PUT /v1/users/{userId}/alarms/{alarmId}
+        Request (full alarm object, with server-computed fields stripped):
+        {
+            "id": "uuid",
+            "enabled": false,
+            "time": "07:00:00",
+            "repeat": {"enabled": true, "weekDays": {"monday": true, ...}},
+            "thermal": {"enabled": true, "temperature": -10},
+            "vibration": {"enabled": true, "level": 50, "pattern": "rise", "duration": 300},
+            "snoozing": false
+        }
+        Response: 200 with updated alarm object
+        """
+        target_id = alarm_id or self.next_alarm_id
+        if target_id is None:
+            _LOGGER.warning("No alarm ID available to toggle for user %s", self.user_id)
+            return
+
+        alarm = self._get_alarm(target_id)
+        data = dict(alarm)
+        data["enabled"] = enabled
+        # Remove server-computed fields
+        for key in ("nextTimestamp", "startTimestamp", "endTimestamp",
+                     "dismissedUntil", "snoozedUntil"):
+            data.pop(key, None)
+
+        url = APP_API_URL + f"v1/users/{self.user_id}/alarms/{target_id}"
+        await self.device.api_request("PUT", url, data=data)
+
+    async def turn_off_side(self):
+        """Turns off the side of the user"""
+        url = APP_API_URL + f"v1/users/{self.user_id}/temperature"
+        data = {"currentState": {"type": "off"}}
+        await self.device.api_request("PUT", url, data=data)
+
+    async def set_away_mode(self, action: str):
+        """Sets the away mode. The action can either be 'start' or 'stop'"""
+        # The away-mode endpoint is user-scoped, but Eight Sleep's backend applies it to
+        # whichever pod is currently the account's "current device" rather than the pod
+        # this user actually belongs to. On accounts with multiple pods this can silently
+        # flip the wrong pod's away mode (see GH issue #116; the PR #109 device-id fix did
+        # not resolve this since it never re-asserts the current device before the call).
+        # Re-sync this user's bed side/current-device first so the away-mode call always
+        # lands on the pod that owns this entity, mirroring the set_bed_side workaround
+        # reported to fix this in practice.
+        if self.side:
+            try:
+                await self.set_bed_side(self.side)
+            except Exception as err:  # noqa: BLE001 - best effort, don't block away mode
+                _LOGGER.warning(
+                    f"User {self.user_id}: Could not sync current device (side '{self.side}') "
+                    f"before setting away mode; on multi-pod accounts this call may target the "
+                    f"wrong pod: {err}"
+                )
+        else:
+            _LOGGER.warning(
+                f"User {self.user_id}: No known bed side; skipping current-device sync before "
+                f"setting away mode. On multi-pod accounts this call may target the wrong pod."
+            )
+
+        url = APP_API_URL + f"v1/users/{self.user_id}/away-mode"
+        # Setting time to UTC of 24 hours ago to get API to trigger immediately
+        now = str(
+            (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.%f")[
+                :-3
+            ]
+            + "Z"
+        )
+        if action != "start" and action != "end":
+            raise Exception(f"Invalid action: {action}")
+        data = {"awayPeriod": {action: now}}
+        _LOGGER.debug(f"User {self.user_id}: Setting away mode action '{action}' with payload {data}")
+        await self.device.api_request("PUT", url, data=data)
+        _LOGGER.debug(f"User {self.user_id}: Successfully set away mode action '{action}'")
+
+    async def update_user_profile(self) -> None:
+        """Update user profile data."""
+        url = f"{CLIENT_API_URL}/users/{self.user_id}"
+        profile_data = await self.device.api_request("get", url)
+        if profile_data is None:
+            _LOGGER.error("Unable to fetch user profile data for %s", self.user_id)
+        else:
+            self._user_profile = profile_data["user"]
+
+    async def update_trend_data(self, start_date: str, end_date: str) -> None:
+        """Update trends data json for specified time period. V2 of the api used"""
+        url = f"{CLIENT_API_URL}/users/{self.user_id}/trends"
+        params = {
+            "tz": self.device.timezone,
+            "from": start_date,
+            "to": end_date,
+            "include-main": "false",
+            "include-all-sessions": "true",
+            "model-version": "v2",
+        }
+        trend_data = await self.device.api_request("get", url, params=params)
+        self.trends = trend_data.get("days", [])
+
+    @staticmethod
+    def _is_subscription_required_error(err: RequestError) -> bool:
+        """Return True for the 403 "subscription required" alarms API error."""
+        if err.status != 403:
+            return False
+        if not isinstance(err.error_details, dict):
+            return False
+        return "subscription" in str(err.error_details.get("message", "")).lower()
+
+    async def update_routines_data(self) -> None:
+        """Update alarm data from the new /v2/alarms endpoint.
+
+        GET /v2/users/{userId}/alarms
+        Response:
+        {
+            "alarms": [
+                {
+                    "id": "uuid",
+                    "enabled": true,
+                    "time": "07:00:00",
+                    "repeat": {"enabled": true, "weekDays": {"monday": true, ...}},
+                    "thermal": {"enabled": true, "temperature": -10},
+                    "vibration": {"enabled": true, "level": 50, "pattern": "rise", "duration": 300},
+                    "snoozing": false,
+                    "snoozedUntil": null,
+                    "nextTimestamp": "2025-01-15T07:00:00Z",
+                    "startTimestamp": "2025-01-15T06:55:00Z",
+                    "endTimestamp": "2025-01-15T07:30:00Z",
+                    "dismissedUntil": null
+                }
+            ],
+            "recommendedAlarm": { ...same shape as alarm above... }
+        }
+        """
+        url = APP_API_URL + f"v2/users/{self.user_id}/alarms"
+        try:
+            resp = await self.device.api_request("GET", url)
+        except RequestError as err:
+            if not self._is_subscription_required_error(err):
+                raise
+            # Accounts without an active subscription get 403 "subscription
+            # required" from the alarms API. Propagating the error here kills
+            # the whole user coordinator on every refresh (#122), taking down
+            # climate/sensors that don't need a subscription at all. Degrade
+            # gracefully instead: no alarm data, everything else keeps working.
+            _LOGGER.debug("Alarms unavailable for user %s: %s", self.user_id, err)
+            self.alarms = []
+            self.next_alarm = None
+            self.next_alarm_id = None
+            return
+
+        self.alarms = resp.get("alarms", [])
+
+        # Find the chronologically soonest enabled alarm across ALL alarms
+        # (not just recommendedAlarm, which may skip one-off alarms).
+        #
+        # An alarm is still "current" if its endTimestamp hasn't passed yet
+        # (i.e. it is still ringing). This prevents the next_alarm from
+        # flipping to tomorrow's alarm the instant now >= nextTimestamp,
+        # which would cause the dismiss button to target the wrong alarm.
+        now = datetime.now(timezone.utc)
+        soonest_time: datetime | None = None
+        soonest_id: str | None = None
+
+        all_candidates = list(self.alarms)
+        recommended = resp.get("recommendedAlarm", {})
+        if recommended.get("id"):
+            all_candidates.append(recommended)
+
+        for alarm in all_candidates:
+            if not alarm.get("enabled", False):
+                continue
+            next_ts = alarm.get("nextTimestamp")
+            if not next_ts:
+                continue
+            alarm_dt = self.device.convert_string_to_datetime(next_ts)
+
+            # An alarm is still relevant if it hasn't ended yet (still ringing)
+            # or if its nextTimestamp is in the future (upcoming).
+            end_ts = alarm.get("endTimestamp")
+            if end_ts:
+                end_dt = self.device.convert_string_to_datetime(end_ts)
+                if end_dt < now:
+                    continue  # alarm fully ended
+            elif alarm_dt < now:
+                continue  # no endTimestamp, skip if past
+
+            if soonest_time is None or alarm_dt < soonest_time:
+                soonest_time = alarm_dt
+                soonest_id = alarm["id"]
+
+        if soonest_time and soonest_id:
+            self.next_alarm = soonest_time
+            self.next_alarm_id = soonest_id
+        else:
+            self.next_alarm = None
+            self.next_alarm_id = None
+
+    async def set_alarm_time(self, alarm_id: str, alarm_time: str) -> None:
+        """Set the time on an existing alarm via the new alarms API.
+        Sends the full alarm object as required by the API.
+
+        PUT /v1/users/{userId}/alarms/{alarmId}
+        Request: same as set_alarm_enabled, with "time" field updated
+        Response: 200 with updated alarm object
+        """
+        alarm = self._get_alarm(alarm_id)
+        data = dict(alarm)
+        data["time"] = alarm_time
+        for key in ("nextTimestamp", "startTimestamp", "endTimestamp",
+                     "dismissedUntil", "snoozedUntil"):
+            data.pop(key, None)
+
+        url = APP_API_URL + f"v1/users/{self.user_id}/alarms/{alarm_id}"
+        await self.device.api_request("PUT", url, data=data)
+
+    async def set_routine_alarm(self, routine_id: str, alarm_id: str, alarm_time: str) -> None:
+        """Set an alarm time. routine_id is ignored (kept for backward compat)."""
+        await self.set_alarm_time(alarm_id, alarm_time)
+
+    async def set_routine_bedtime(self, routine_id: str, bedtime: str) -> None:
+        """Bedtime routines are no longer supported by the new API."""
+        _LOGGER.warning(
+            "set_routine_bedtime is no longer supported. "
+            "Eight Sleep has migrated away from the routines API."
+        )
+
+    async def update_base_data(self):
+        """Update the data about the bed base."""
+        if self.device.has_base:
+            try:
+                url = f"{APP_API_URL}v1/users/{self.user_id}/base"
+                self._base_data = await self.device.api_request("GET", url)
+            except RequestError:
+                _LOGGER.warning(
+                    "Unable to fetch base data for user %s. This is normal if the user is not paired to a base.",
+                    self.user_id,
+                )
+
+    def _set_base_angle_locally(self, leg_angle: int, torso_angle: int) -> None:
+        """Apply the optimistic angle update to cached base data, if any.
+
+        base_data_for_side returns a throwaway dict when the side is absent, so
+        writing into it would be a no-op that merely looks like an update. Only
+        mutate the real cached side.
+        """
+        side_data = self.base_data.get(self.corrected_side_for_key)
+        if side_data is None:
+            return
+        side_data.setdefault("leg", {})["currentAngle"] = leg_angle
+        side_data.setdefault("torso", {})["currentAngle"] = torso_angle
+
+    async def set_base_angle(self, leg_angle: int, torso_angle: int) -> None:
+        """Set the angles of the bed base."""
+        if self.device.has_base:
+            # Update the angles locally, when there is local state to update.
+            # update_base_data() swallows a failed GET /base -- the API answers
+            # 404 BaseOffline while the frame is unplugged -- so _base_data can
+            # be empty or partial. Indexing it blindly raised KeyError *before*
+            # the request below, silently dropping the user's command.
+            self._set_base_angle_locally(leg_angle, torso_angle)
+
+            url = f"{APP_API_URL}v1/users/{self.user_id}/base/angle?ignoreDeviceErrors=false"
+            payload = {
+                "deviceId": self.device.device_id,
+                "deviceOnline": True,
+                "legAngle": leg_angle,
+                "torsoAngle": torso_angle,
+                "enableOfflineMode": False
+            }
+            await self.device.api_request("POST", url, data=payload, return_json=False)
+
+    async def set_base_preset(self, preset: str) -> None:
+        """Set the preset of the bed base."""
+        if self.device.has_base:
+            # Update the preset locally
+            # Note: The preset goes missing from the local data when a custom angle is used
+            # and it also goes missing after some time
+            self.base_data_for_side.setdefault("preset", {})["name"] = preset
+
+            url = f"{APP_API_URL}v1/users/{self.user_id}/base/angle?ignoreDeviceErrors=false"
+            payload = {
+                "deviceId": self.device.device_id,
+                "deviceOnline": True,
+                "preset": preset,
+                "enableOfflineMode": False
+            }
+            await self.device.api_request("POST", url, data=payload, return_json=False)
+
+    async def set_one_off_alarm(
+        self,
+        time: str,
+        enabled: bool = True,
+        vibration_enabled: bool = True,
+        vibration_power_level: int = 50,
+        vibration_pattern: str = "RISE",
+        thermal_enabled: bool = True,
+        thermal_level: int = 0,
+    ) -> None:
+        """Create a new alarm via the new alarms API."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/alarms"
+        data = {
+            "time": time,
+            "enabled": enabled,
+            "vibration": {
+                "enabled": vibration_enabled,
+                "powerLevel": vibration_power_level,
+                "pattern": vibration_pattern,
+            },
+            "thermal": {
+                "enabled": thermal_enabled,
+                "level": thermal_level,
+            },
+        }
+        await self.device.api_request("POST", url, data=data)
+
+    # Speaker methods
+    @property
+    def player_state(self) -> dict | None:
+        """Return current player state."""
+        return self._player_state
+
+    @property
+    def audio_tracks(self) -> list[dict]:
+        """Return available audio tracks."""
+        return self._audio_tracks
+
+    async def update_player_state(self) -> None:
+        """Update player state from API."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/audio/player"
+        try:
+            self._player_state = await self.device.api_request("get", url)
+        except RequestError as e:
+            _LOGGER.warning(f"Failed to get player state: {e}")
+            self._player_state = None
+
+    async def fetch_audio_tracks(self) -> None:
+        """Fetch available audio tracks."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/audio/tracks"
+        try:
+            response = await self.device.api_request("get", url)
+            self._audio_tracks = response.get("tracks", [])
+        except RequestError as e:
+            _LOGGER.warning(f"Failed to get audio tracks: {e}")
+
+    async def set_player_state(self, state: str) -> None:
+        """Set player state (Playing/Paused)."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/audio/player/state"
+        await self.device.api_request("put", url, data={"state": state})
+
+    async def set_player_volume(self, volume: int) -> None:
+        """Set player volume (0-100)."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/audio/player/volume"
+        await self.device.api_request("put", url, data={"volume": volume})
+
+    async def set_player_track(self, track_id: str, stop_criteria: str = "ManualStop") -> None:
+        """Set current track."""
+        url = APP_API_URL + f"v1/users/{self.user_id}/audio/player/currentTrack"
+        await self.device.api_request("put", url, data={"id": track_id, "stopCriteria": stop_criteria})

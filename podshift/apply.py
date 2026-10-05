@@ -5,7 +5,8 @@ Does not turn the Pod on. If a write changes power state, the previous state is 
 
 These bands are canonical: 67+ offset 0, 34-66 offset -5, 0-33 offset -10.
 The Supabase nightly function follows this file and always writes the three
-Autopilot levels on a claimed scored night.
+Autopilot levels on a claimed scored night. That function is still hand-rolled.
+This script's Eight Sleep auth and Autopilot reads/writes go through pyEight.
 """
 
 import fcntl
@@ -20,13 +21,11 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from eight_client import open_eight
 from home import home
 
 TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 WHOOP_API = "https://api.prod.whoop.com/developer/v2"
-AUTH_URL = "https://auth-api.8slp.net/v1/tokens"
-CLIENT_API = "https://client-api.8slp.net/v1"
-APP_API = "https://app-api.8slp.net/v1"
 
 def _path(name: str) -> Path:
     return home() / name
@@ -187,116 +186,11 @@ def latest_recovery() -> dict:
     }
 
 
-def eight_headers(token: str) -> dict:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "okhttp/4.9.3",
-    }
-
-
-def eight_login() -> str:
-    response = requests.post(
-        AUTH_URL,
-        data={
-            "grant_type": "password",
-            "username": os.environ["EIGHT_SLEEP_EMAIL"],
-            "password": os.environ["EIGHT_SLEEP_PASSWORD"],
-            "client_id": os.environ["EIGHT_SLEEP_CLIENT_ID"],
-            "client_secret": os.environ["EIGHT_SLEEP_CLIENT_SECRET"],
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "okhttp/4.9.3"},
-        timeout=30,
-    )
-    if response.status_code != 200:
-        raise SystemExit(f"eight login failed: {response.status_code}")
-    payload = response.json()
-    save_json(
-        _path("eight_session.json"),
-        {
-            "access_token": payload["access_token"],
-            "refresh_token": payload.get("refresh_token"),
-            "expires_in": payload.get("expires_in"),
-            "userId": payload.get("userId"),
-            "obtained_at": int(time.time()),
-        },
-    )
-    return payload["access_token"]
-
-
-def eight_token() -> str:
-    if _path("eight_session.json").exists():
-        session = json.loads(_path("eight_session.json").read_text())
-        if session.get("access_token"):
-            return session["access_token"]
-    return eight_login()
-
-
-def eight_get_temperature(token: str, user_id: str) -> tuple[str, dict]:
-    response = requests.get(
-        f"{APP_API}/users/{user_id}/temperature",
-        headers=eight_headers(token),
-        timeout=30,
-    )
-    if response.status_code == 401:
-        token = eight_login()
-        response = requests.get(
-            f"{APP_API}/users/{user_id}/temperature",
-            headers=eight_headers(token),
-            timeout=30,
-        )
-    if response.status_code != 200:
-        raise SystemExit(f"eight temperature read failed: {response.status_code}")
-    return token, response.json()
-
-
-def user_id_for(token: str) -> tuple[str, str]:
-    session = json.loads(_path("eight_session.json").read_text()) if _path("eight_session.json").exists() else {}
-    user_id = session.get("userId")
-    if user_id:
-        return token, user_id
-    me = requests.get(f"{CLIENT_API}/users/me", headers=eight_headers(token), timeout=30)
-    if me.status_code == 401:
-        token = eight_login()
-        me = requests.get(f"{CLIENT_API}/users/me", headers=eight_headers(token), timeout=30)
-    if me.status_code != 200:
-        raise SystemExit(f"eight user lookup failed: {me.status_code}")
-    user_id = (me.json().get("user") or {}).get("userId")
-    if not user_id:
-        raise SystemExit("eight user id missing")
-    return token, user_id
-
-
 def power_state(body: dict) -> str | None:
     state = body.get("currentState") or {}
     if isinstance(state, dict):
         return state.get("type")
     return None
-
-
-def set_power(token: str, user_id: str, state: str) -> None:
-    response = requests.put(
-        f"{APP_API}/users/{user_id}/temperature/pod",
-        params={"ignoreDeviceErrors": "true"},
-        headers=eight_headers(token),
-        json={"currentState": {"type": state}},
-        timeout=30,
-    )
-    if response.status_code >= 300:
-        raise SystemExit(f"eight power restore failed: {response.status_code}")
-
-
-def write_smart(token: str, user_id: str, levels: dict) -> None:
-    response = requests.put(
-        f"{APP_API}/users/{user_id}/temperature/pod",
-        params={"ignoreDeviceErrors": "true"},
-        headers=eight_headers(token),
-        json={"smart": {stage: levels[stage] for stage in STAGES}},
-        timeout=30,
-    )
-    if response.status_code >= 300:
-        raise SystemExit(f"eight smart update failed: {response.status_code} {response.text[:200]}")
 
 
 def target_levels(recovery: dict) -> tuple[dict, int] | None:
@@ -348,72 +242,76 @@ def main() -> None:
         save_json(_path("last_run.json"), result)
         print(json.dumps(result))
         return
-    with apply_lock():
-        prior = already_applied_tonight()
-        if prior and not dry_run:
-            result = {
-                "at": now,
-                "scheduler": scheduler_name(),
-                "skipped": "already_applied",
-                "handled_by": prior.get("scheduler", "unknown"),
-                "applied": False,
-            }
-            append_scheduler_log(result)
+    pod = None
+    try:
+        with apply_lock():
+            prior = already_applied_tonight()
+            if prior and not dry_run:
+                result = {
+                    "at": now,
+                    "scheduler": scheduler_name(),
+                    "skipped": "already_applied",
+                    "handled_by": prior.get("scheduler", "unknown"),
+                    "applied": False,
+                }
+                append_scheduler_log(result)
+                print(json.dumps(result))
+                return
+            pod = open_eight()
+            before = pod.read()
+        before_power = power_state(before)
+        result = {
+            "at": now,
+            "scheduler": scheduler_name(),
+            "dry_run": dry_run,
+            "recovery_score": recovery.get("recovery_score"),
+            "score_state": recovery.get("score_state"),
+            "before_power": before_power,
+            "before_smart": before.get("smart"),
+            "applied": False,
+        }
+        if planned is None:
+            result["skipped"] = recovery.get("status") or "unscored"
+            if not dry_run:
+                save_json(_path("last_run.json"), result)
             print(json.dumps(result))
             return
-        token = eight_token()
-        token, user_id = user_id_for(token)
-        token, before = eight_get_temperature(token, user_id)
-    before_power = power_state(before)
-    result = {
-        "at": now,
-        "scheduler": scheduler_name(),
-        "dry_run": dry_run,
-        "recovery_score": recovery.get("recovery_score"),
-        "score_state": recovery.get("score_state"),
-        "before_power": before_power,
-        "before_smart": before.get("smart"),
-        "applied": False,
-    }
-    if planned is None:
-        result["skipped"] = recovery.get("status") or "unscored"
-        if not dry_run:
+        levels, delta = planned
+        result["offset"] = delta
+        result["target"] = levels
+        if dry_run:
+            save_json(_path("last_dry_run.json"), result)
+            print(json.dumps(result))
+            return
+        with apply_lock():
+            prior = already_applied_tonight()
+            if prior:
+                result = {
+                    "at": now,
+                    "scheduler": scheduler_name(),
+                    "skipped": "already_applied",
+                    "handled_by": prior.get("scheduler", "unknown"),
+                    "applied": False,
+                }
+                append_scheduler_log(result)
+                print(json.dumps(result))
+                return
+            pod.write_smart(levels)
+            after = pod.read()
+            after_power = power_state(after)
+            if before_power and after_power and after_power != before_power:
+                pod.set_power(before_power)
+                after = pod.read()
+                result["power_restored"] = True
+            result["applied"] = True
+            result["after_power"] = power_state(after)
+            result["after_smart"] = after.get("smart")
             save_json(_path("last_run.json"), result)
+            append_scheduler_log({"at": now, "scheduler": scheduler_name(), "action": "applied"})
         print(json.dumps(result))
-        return
-    levels, delta = planned
-    result["offset"] = delta
-    result["target"] = levels
-    if dry_run:
-        save_json(_path("last_dry_run.json"), result)
-        print(json.dumps(result))
-        return
-    with apply_lock():
-        prior = already_applied_tonight()
-        if prior:
-            result = {
-                "at": now,
-                "scheduler": scheduler_name(),
-                "skipped": "already_applied",
-                "handled_by": prior.get("scheduler", "unknown"),
-                "applied": False,
-            }
-            append_scheduler_log(result)
-            print(json.dumps(result))
-            return
-        write_smart(token, user_id, levels)
-        token, after = eight_get_temperature(token, user_id)
-        after_power = power_state(after)
-        if before_power and after_power and after_power != before_power:
-            set_power(token, user_id, before_power)
-            token, after = eight_get_temperature(token, user_id)
-            result["power_restored"] = True
-        result["applied"] = True
-        result["after_power"] = power_state(after)
-        result["after_smart"] = after.get("smart")
-        save_json(_path("last_run.json"), result)
-        append_scheduler_log({"at": now, "scheduler": scheduler_name(), "action": "applied"})
-    print(json.dumps(result))
+    finally:
+        if pod is not None:
+            pod.close()
 
 
 if __name__ == "__main__":
