@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Daily 9:25pm America/Chicago fallback. Independent of the Gamut 9:00pm task."""
+"""Deprecated. Daily 9:25pm America/Chicago daemon that backed up the Gamut task.
+
+The Supabase Edge Function is the nightly scheduler. Leave this daemon stopped.
+"""
 
 import json
 import os

@@ -1,16 +1,68 @@
-# Podshift Supabase fallback
+# Podshift nightly scheduler
 
-Supabase project `occbockorwzmykztvziu` runs an independent Edge Function at
-9:25 p.m. America/Chicago. Gamut's 9:00 p.m. job stays primary. The function
-reads the latest scored WHOOP recovery, calculates from the saved green-day
-baseline, reads Eight Sleep Autopilot levels, and **skips the write if the Pod
-is already at the desired levels**. It never turns the Pod on.
+Supabase project `occbockorwzmykztvziu` runs Edge Function `podshift-fallback` at
+9:25 p.m. America/Chicago. This is the primary Podshift scheduler. The function
+slug and the cron job name `podshift-fallback-2125-chicago` are historical.
+Nothing else is expected to run first.
+
+The function reads the latest scored WHOOP recovery and writes the three
+Autopilot smart levels from the saved green-day baseline plus the offset in
+`podshift/apply.py`:
+
+| Recovery | Offset |
+| --- | --- |
+| 67–100 | 0 |
+| 34–66 | -5 |
+| 0–33 | -10 |
+
+On a claimed night with a scored recovery it always PUTs those three levels,
+including when the Pod already has them. It does not return `already_at_target`.
+That early return existed so the function would not fight Gamut. Gamut is
+deprecated and is not a coordination partner.
+
+It never turns the Pod on. If the write changes power state, it restores the
+previous state, then checks that the three levels match.
+
+Each Chicago date is claimed once in `podshift_private.runs` before any WHOOP
+or Eight Sleep call. A second invocation returns `already_checked`. Unscored or
+calibrating recovery records `unscored` and does not write. `enabled = false`
+returns `disabled` and does not claim the date. A dry run is still allowed
+while paused; it does not claim the date and does not write.
 
 This function is authorized by the `X-Podshift-Cron` header, not by a user JWT.
 
-This fallback is initially **disabled**. It needs a separate WHOOP refresh
-token and its own Eight Sleep credentials in this project's Edge Function
-Secrets. Never put these values in GitHub, the SQL editor, or a chat.
+Eight Sleep and WHOOP credentials are Edge Function secrets, read from the
+environment only. Never put those values in GitHub, the SQL editor, a chat, or
+this repository.
+
+## What a night records
+
+`podshift_private.runs` keeps the original columns and adds four nullable ones
+in `supabase/migrations/podshift_runs_observability.sql`:
+
+| Column | Meaning |
+| --- | --- |
+| `outcome` | `running`, then `applied`, `unscored`, or `error` |
+| `recovery` | WHOOP recovery score when one was read |
+| `offset` | 0, -5, or -10 |
+| `matched_before` | true when the three live smart levels already equaled the target before the PUT |
+| `expected` | the three target levels |
+| `before_levels` | the three live smart levels read before the PUT |
+| `error_code` | short failure reason. A failed write still stores offset, match, expected, and before levels when they were known |
+
+`already_checked` is only the HTTP response for a date that was already claimed.
+The existing row is left alone. `already_at_target` is no longer written. Older
+rows may still have it.
+
+Apply the observability migration before deploying the function that fills the
+new columns. This repository change does not run that migration and does not
+deploy the function. If the columns are missing, the function still saves
+`outcome`, `recovery`, and `error_code`, and the HTTP body still includes the
+new fields.
+
+Readers of `local_date`, `outcome`, `scheduler`, `recovery`, and `error_code`
+do not need to change. A night that already matched is `outcome = applied`
+with `matched_before = true`, not a distinct outcome.
 
 ## Provisioning
 
@@ -22,9 +74,16 @@ set `WHOOP_CLIENT_ID`, `WHOOP_CLIENT_SECRET`,
 `podshift/whoop_auth.py` with the offline scope. Once the function uses it,
 the rotated token lives in the project's private database state.
 
-The private baseline currently holds the green-day values last reported by
-the existing Podshift dry run: bedtime +32, initial sleep +30, final sleep -10.
-Compare these with the current `baseline.json` before enabling.
+The private baseline holds the green-day values the offset is applied to.
+Compare these with the current `baseline.json` before relying on a night.
+
+On a database that already ran `podshift_fallback.sql`, apply only:
+
+`supabase/migrations/podshift_runs_observability.sql`
+
+A new database needs that file after `podshift_fallback.sql`.
+
+## Dry run
 
 Run a read-only dry run from the Supabase SQL editor. This SQL passes the
 private invocation key from the database without printing it:
@@ -40,7 +99,9 @@ select net.http_post(
 );
 ```
 
-Inspect the corresponding response in `net._http_response`. Only after a
+Inspect the corresponding response in `net._http_response`. A dry run returns
+`dry_run` plus `score`, `offset`, `matched_before`, `expected`, and
+`before_levels`. It does not claim the date and does not PUT. Only after a
 successful dry run, enable the scheduled job:
 
 ```sql
@@ -55,13 +116,7 @@ completed before the response failed.
 
 ## Limits
 
-- No away/home check. `podshift_private.state` has no column for it, and none is added here. `PODSHIFT_AWAY` is honored only by the Python `apply.py` path.
-
-- Gamut and Supabase do not share a lock or completion record. Supabase reads
-  the Pod's actual target levels, so a successful Gamut write usually leads
-  to a skip. If Gamut and Supabase overlap, both may write the same values.
-- If Gamut applies a green-day target already on the Pod, Supabase cannot tell
-  which scheduler did so; it records `already_at_target`.
-- WHOOP and Eight Sleep API behavior may change. Keep the Gamut job enabled
-  until the Supabase dry run and at least one scheduled night succeed.
-- Secrets must be supplied to this separate project before activation.
+- No away/home check. `podshift_private.state` has no column for it. `PODSHIFT_AWAY` is honored only by the Python `apply.py` path. Pause this function with `enabled = false`.
+- The function does not coordinate with Gamut or with `apply.py`. If a deprecated Gamut job or a manual `apply.py` runs the same night, both can write the same target. Leave Gamut off.
+- WHOOP and Eight Sleep API behavior may change.
+- Secrets must be supplied to this project before activation. Do not commit them.
