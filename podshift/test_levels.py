@@ -47,6 +47,8 @@ class OffsetTests(unittest.TestCase):
 
 
 class AlreadyAppliedTests(unittest.TestCase):
+    """Local once-per-night file lock in apply.py. The Supabase nightly function does not use it."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["PODSHIFT_HOME"] = self.tmp.name
@@ -55,12 +57,12 @@ class AlreadyAppliedTests(unittest.TestCase):
         self.tmp.cleanup()
         os.environ.pop("PODSHIFT_HOME", None)
 
-    def test_skip_when_gamut_applied_today(self):
+    def test_skip_when_local_run_applied_today(self):
         now = datetime.now(TZ)
-        record = {"at": now.isoformat(timespec="seconds"), "applied": True, "scheduler": "gamut"}
+        record = {"at": now.isoformat(timespec="seconds"), "applied": True, "scheduler": "manual"}
         Path(self.tmp.name, "last_run.json").write_text(json.dumps(record))
         found = already_applied_tonight(now)
-        self.assertEqual(found["scheduler"], "gamut")
+        self.assertEqual(found["scheduler"], "manual")
 
     def test_dry_run_does_not_count(self):
         now = datetime.now(TZ)
@@ -81,7 +83,7 @@ class AlreadyAppliedTests(unittest.TestCase):
                         {
                             "at": datetime.now(TZ).isoformat(timespec="seconds"),
                             "applied": True,
-                            "scheduler": "gamut",
+                            "scheduler": "manual",
                         }
                     )
                 )
@@ -93,7 +95,7 @@ class AlreadyAppliedTests(unittest.TestCase):
         with apply_lock():
             found = already_applied_tonight()
         thread.join(timeout=2)
-        self.assertEqual(found["scheduler"], "gamut")
+        self.assertEqual(found["scheduler"], "manual")
 
 
 class AwayTests(unittest.TestCase):

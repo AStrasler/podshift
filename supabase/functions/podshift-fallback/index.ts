@@ -14,6 +14,23 @@ type State = {
   cron_key: string; whoop_refresh_token: string | null;
   baseline: Record<string, number> | null; enabled: boolean;
 };
+type Observation = {
+  score?: number;
+  offset?: number;
+  matched_before?: boolean;
+  expected?: Record<string, number>;
+  before_levels?: Record<string, number | null>;
+};
+type NightResult = Observation & { outcome: string; applied: boolean };
+
+class RunError extends Error {
+  detail: Observation;
+  constructor(message: string, detail: Observation = {}) {
+    super(message);
+    this.detail = detail;
+  }
+}
+
 const env = (name: string) => {
   const value = Deno.env.get(name);
   if (!value) throw new Error("missing_" + name);
@@ -96,43 +113,101 @@ async function pod() {
     encodeURIComponent(userId) + "/temperature", { headers }, "eight_temperature");
   return { headers, url, read };
 }
+function offsetFor(score: number) {
+  // Same bands as podshift/apply.py. Do not add felt-temperature rules here.
+  return score >= 67 ? 0 : score >= 34 ? -5 : -10;
+}
 function target(baseline: Record<string, number>, score: number) {
-  const offset = score >= 67 ? 0 : score >= 34 ? -5 : -10;
-  const result: Record<string, number> = {};
+  const offset = offsetFor(score);
+  const expected: Record<string, number> = {};
   for (const stage of levels) {
     const original = baseline[stage];
     if (!Number.isInteger(original) || original < -100 || original > 100)
-      throw new Error("invalid_baseline");
-    result[stage] = Math.max(-100, Math.min(100, original + offset));
+      throw new RunError("invalid_baseline", { score, offset });
+    expected[stage] = Math.max(-100, Math.min(100, original + offset));
   }
-  return result;
+  return { expected, offset };
 }
-async function run(state: State, dryRun: boolean) {
+function smartSnapshot(body: { smart?: Record<string, unknown> }) {
+  const smart = body.smart ?? {};
+  const snapshot: Record<string, number | null> = {};
+  for (const stage of levels) {
+    const value = smart[stage];
+    snapshot[stage] = typeof value === "number" ? value : null;
+  }
+  return snapshot;
+}
+function asJson(value: Record<string, number | null> | undefined) {
+  if (value === undefined) return null;
+  return db.json(value);
+}
+function isUndefinedColumn(error: unknown) {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: string; message?: string };
+  return candidate.code === "42703" ||
+    (typeof candidate.message === "string" && /column .* does not exist/i.test(candidate.message));
+}
+async function finish(date: string, outcome: string, detail: Observation, errorCode?: string) {
+  // Columns from supabase/migrations/podshift_runs_observability.sql.
+  // If that migration is not applied yet, keep the original row update so the
+  // night is still recorded. The HTTP body still carries the new fields.
+  const base = async () => {
+    await db`update podshift_private.runs set outcome = ${outcome},
+      recovery = ${detail.score ?? null},
+      error_code = ${errorCode ?? null}
+      where local_date = ${date}`;
+  };
+  try {
+    await db`update podshift_private.runs set outcome = ${outcome},
+      recovery = ${detail.score ?? null},
+      error_code = ${errorCode ?? null},
+      offset = ${detail.offset ?? null},
+      matched_before = ${detail.matched_before ?? null},
+      expected = ${asJson(detail.expected)},
+      before_levels = ${asJson(detail.before_levels)}
+      where local_date = ${date}`;
+  } catch (error) {
+    if (!isUndefinedColumn(error)) throw error;
+    console.error("Podshift runs_observability_columns_missing");
+    await base();
+  }
+}
+async function run(state: State, dryRun: boolean): Promise<NightResult> {
   if (!state.baseline) throw new Error("missing_baseline");
   const score = await recoveryScore(state);
   if (score === null) return { outcome: "unscored", applied: false };
-  const expected = target(state.baseline, score);
-  const eight = await pod();
-  const before = await eight.read();
-  const same = levels.every(stage => before.smart?.[stage] === expected[stage]);
-  if (same) return { outcome: "already_at_target", applied: false, score };
-  if (dryRun) return { outcome: "dry_run", applied: false, score, expected };
-  const beforePower = before.currentState?.type;
-  await request(eight.url + "?ignoreDeviceErrors=true", {
-    method: "PUT", headers: eight.headers, body: JSON.stringify({ smart: expected }),
-  }, "eight_write");
-  let after = await eight.read();
-  if (beforePower && after.currentState?.type !== beforePower) {
+  const { expected, offset } = target(state.baseline, score);
+  const observed: Observation = { score, offset, expected };
+  try {
+    const eight = await pod();
+    const before = await eight.read();
+    const beforeLevels = smartSnapshot(before);
+    observed.matched_before = levels.every(stage => beforeLevels[stage] === expected[stage]);
+    observed.before_levels = beforeLevels;
+    if (dryRun) return { outcome: "dry_run", applied: false, ...observed };
+    // Claimed scored nights always PUT, including when the Pod already matches.
+    // Matching levels are recorded on the run row; they are not a skip.
+    const beforePower = before.currentState?.type;
     await request(eight.url + "?ignoreDeviceErrors=true", {
-      method: "PUT", headers: eight.headers,
-      body: JSON.stringify({ currentState: { type: beforePower } }),
-    }, "eight_power_restore");
-    after = await eight.read();
-    if (after.currentState?.type !== beforePower) throw new Error("power_restore_failed");
+      method: "PUT", headers: eight.headers, body: JSON.stringify({ smart: expected }),
+    }, "eight_write");
+    let after = await eight.read();
+    if (beforePower && after.currentState?.type !== beforePower) {
+      await request(eight.url + "?ignoreDeviceErrors=true", {
+        method: "PUT", headers: eight.headers,
+        body: JSON.stringify({ currentState: { type: beforePower } }),
+      }, "eight_power_restore");
+      after = await eight.read();
+      if (after.currentState?.type !== beforePower) throw new RunError("power_restore_failed", observed);
+    }
+    if (!levels.every(stage => after.smart?.[stage] === expected[stage]))
+      throw new RunError("write_not_verified", observed);
+    return { outcome: "applied", applied: true, ...observed };
+  } catch (error) {
+    if (error instanceof RunError) throw error;
+    const reason = error instanceof Error ? error.message : "unknown_error";
+    throw new RunError(reason, observed);
   }
-  if (!levels.every(stage => after.smart?.[stage] === expected[stage]))
-    throw new Error("write_not_verified");
-  return { outcome: "applied", applied: true, score };
 }
 
 Deno.serve(async (req) => {
@@ -152,14 +227,21 @@ Deno.serve(async (req) => {
       if (!claimed.length) return Response.json({ outcome: "already_checked" });
     }
     const result = await run(state, dryRun);
-    if (!dryRun) await db`update podshift_private.runs set outcome = ${result.outcome},
-      recovery = ${result.score ?? null} where local_date = ${date}`;
+    if (!dryRun) await finish(date, result.outcome, result);
     return Response.json(result);
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown_error";
-    if (!dryRun) await db`update podshift_private.runs set outcome = 'error',
-      error_code = ${reason.slice(0, 100)} where local_date = ${date}`;
-    console.error("Podshift fallback:", reason);
-    return Response.json({ outcome: "error", error_code: reason }, { status: 500 });
+    const detail = error instanceof RunError ? error.detail : {};
+    if (!dryRun) {
+      try {
+        await finish(date, "error", detail, reason.slice(0, 100));
+      } catch (writeError) {
+        const code = typeof writeError === "object" && writeError !== null &&
+          "code" in writeError ? String((writeError as { code?: string }).code) : "unknown_error";
+        console.error("Podshift run row update failed:", code);
+      }
+    }
+    console.error("Podshift nightly:", reason);
+    return Response.json({ outcome: "error", error_code: reason, ...detail }, { status: 500 });
   }
 });

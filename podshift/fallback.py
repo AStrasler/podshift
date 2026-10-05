@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run apply.py only if tonight's setting was not already applied."""
+"""Deprecated local helper for the retired Gamut schedule.
+
+The Supabase nightly function is the scheduler. This script still runs apply.py
+only when tonight's local last_run.json is not already applied. It does not
+coordinate with Supabase. Leave the daemon that calls it stopped.
+"""
 
 import json
 import os

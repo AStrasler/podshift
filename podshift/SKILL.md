@@ -2,12 +2,12 @@
 name: Podshift
 description: Read the owner's Whoop recovery and shift Eight Sleep Pod temperature before bed. Use for Whoop login, recovery checks, and Pod temperature changes.
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Podshift
 
-Personal controller. Tokens live in `$PODSHIFT_HOME` (`/workspace/.podshift` on this agent, otherwise `~/.podshift`). Never print client secrets, access tokens, or refresh tokens. Set `PODSHIFT_DISABLED=1` to skip the Pod write. Set `PODSHIFT_AWAY=1` to skip the write while away from home; there is no location signal, and leaving it unset does not skip. Primary schedule is `Podshift bedtime` at 9:00pm America/Chicago. Fallback daemon runs at 9:25pm on this container and skips if `last_run.json` already shows tonight applied. Pause only the fallback with `$PODSHIFT_HOME/fallback.paused`.
+Personal controller. Tokens for the local scripts live in `$PODSHIFT_HOME` (`/workspace/.podshift` on this agent, otherwise `~/.podshift`). Never print client secrets, access tokens, or refresh tokens. Set `PODSHIFT_DISABLED=1` to skip the Pod write from `apply.py`. Set `PODSHIFT_AWAY=1` to skip the local write while away from home; there is no location signal, and leaving it unset does not skip. The primary nightly scheduler is the Supabase Edge Function `podshift-fallback` at 9:25pm America/Chicago. It claims each Chicago date once and, on a scored night, always writes the three Autopilot levels from the green-day baseline plus the recovery offset, even when those levels already match. Record that match; do not skip it. Gamut (`Podshift bedtime`, 9:00pm) is deprecated and is not a coordination signal. The container fallback daemon is deprecated with it. Do not start it. Pause the Supabase job with `enabled = false` on `podshift_private.state`.
 
 ## Whoop login
 

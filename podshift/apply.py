@@ -2,6 +2,10 @@
 """Apply a Whoop recovery offset to saved Eight Sleep Autopilot levels.
 
 Does not turn the Pod on. If a write changes power state, the previous state is restored.
+
+These bands are canonical: 67+ offset 0, 34-66 offset -5, 0-33 offset -10.
+The Supabase nightly function follows this file and always writes the three
+Autopilot levels on a claimed scored night.
 """
 
 import fcntl
