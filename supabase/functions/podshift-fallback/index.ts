@@ -90,10 +90,13 @@ async function pod() {
   const token = await request("https://auth-api.8slp.net/v1/tokens", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "okhttp/4.9.3" },
+    // Fixed public Eight Sleep app client (podshift/pyeight/constants.py).
+    // Eight Sleep issues no developer credentials. Env is an optional override.
     body: new URLSearchParams({
       grant_type: "password", username: env("EIGHT_SLEEP_EMAIL"),
       password: env("EIGHT_SLEEP_PASSWORD"),
-      client_id: env("EIGHT_SLEEP_CLIENT_ID"), client_secret: env("EIGHT_SLEEP_CLIENT_SECRET"),
+      client_id: Deno.env.get("EIGHT_SLEEP_CLIENT_ID") ?? "0894c7f33bb94800a03f1f4df13a4f38",
+      client_secret: Deno.env.get("EIGHT_SLEEP_CLIENT_SECRET") ?? "f0954a3ed5763ba3d06834c73731a32f15f168f47d4f164751275def86db0c76",
     }),
   }, "eight_login");
   const headers = {
@@ -220,10 +223,15 @@ Deno.serve(async (req) => {
   if (!state.enabled && !dryRun) return Response.json({ outcome: "disabled" });
   const date = localDate();
   try {
-    // Claim the date before doing I/O. No second Supabase worker may run this day.
+    // Claim the date before doing I/O. A row still marked unscored can be
+    // claimed again. Any other outcome for this Chicago date stays put.
     if (!dryRun) {
       const claimed = await db`insert into podshift_private.runs (local_date, outcome)
-        values (${date}, 'running') on conflict do nothing returning local_date`;
+        values (${date}, 'running')
+        on conflict (local_date) do update
+          set outcome = 'running', attempted_at = now()
+          where podshift_private.runs.outcome = 'unscored'
+        returning local_date`;
       if (!claimed.length) return Response.json({ outcome: "already_checked" });
     }
     const result = await run(state, dryRun);
