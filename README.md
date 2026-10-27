@@ -12,7 +12,7 @@ The Supabase edge function is still the hand-rolled client. This stage does not 
 
 ## What triggers it
 
-The nightly run is the Supabase Edge Function `podshift-fallback` on project `occbockorwzmykztvziu`. The slug is historical. The function is the primary scheduler: pg_cron calls it at 9:25 p.m. America/Chicago, it claims that Chicago date once, and it does not depend on any other job. Setup, pause, and the runs table are in [supabase/README.md](supabase/README.md).
+The nightly run is the Supabase Edge Function `podshift-fallback` on project `occbockorwzmykztvziu`. The slug is historical. The function is the primary scheduler: pg_cron calls it at 9:25 p.m. America/Chicago and, when that night is still unscored, again at 10:25 and 11:25 p.m. It does not depend on any other job. Setup, pause, and the runs table are in [supabase/README.md](supabase/README.md).
 
 `apply.py` is the same temperature rules for a manual run. It does not have to be running for the night to happen.
 
@@ -42,7 +42,7 @@ Power is left alone. If that write unexpectedly changes the power state, the pre
 
 ## Schedulers
 
-Primary: Supabase Edge Function `podshift-fallback`, 9:25 p.m. America/Chicago. pg_cron fires at 02:25 and 03:25 UTC and the SQL predicate keeps the call that falls at 21:00 Chicago. The function inserts `podshift_private.runs` for that Chicago date before it calls WHOOP or Eight Sleep. A second call the same date returns `already_checked` and does not write. After a scored recovery it always PUTs `bedTimeLevel`, `initialSleepLevel`, and `finalSleepLevel`. If those levels already matched, the row still says `applied` and `matched_before` is true. The row also stores `recovery_offset`, `expected`, and `before_levels` after `supabase/migrations/podshift_runs_observability.sql` is applied. The HTTP body still calls the offset field `offset`.
+Primary: Supabase Edge Function `podshift-fallback`, 9:25 p.m. America/Chicago, retried at 10:25 and 11:25 p.m. when the night is still unscored. pg_cron fires at 02:25, 03:25, 04:25, and 05:25 UTC. The SQL predicate keeps the call whose Chicago hour is 21, and keeps hours 22 and 23 only when today's `podshift_private.runs` row is missing or `unscored`. The function inserts that Chicago date, or reclaims an `unscored` row, before it calls WHOOP or Eight Sleep. A call for any other outcome returns `already_checked` and does not write. After a scored recovery it always PUTs `bedTimeLevel`, `initialSleepLevel`, and `finalSleepLevel`. If those levels already matched, the row still says `applied` and `matched_before` is true. The row also stores `recovery_offset`, `expected`, and `before_levels` after `supabase/migrations/podshift_runs_observability.sql` is applied. The HTTP body still calls the offset field `offset`.
 
 Pause the nightly function:
 
@@ -101,8 +101,8 @@ Optional:
 | `PODSHIFT_HOME` | Directory for tokens, baseline, and `last_run.json` |
 | `PODSHIFT_DISABLED` | `1`, `true`, or `yes` skips the Pod write |
 | `PODSHIFT_AWAY` | `1`, `true`, or `yes` skips the Pod write while away. Unset does nothing |
-| `EIGHT_SLEEP_CLIENT_ID` | Optional Python override. Unset uses pyEight's built-in app client id. Still required by the Supabase function |
-| `EIGHT_SLEEP_CLIENT_SECRET` | Optional Python override. Unset uses pyEight's built-in app client secret. Still required by the Supabase function |
+| `EIGHT_SLEEP_CLIENT_ID` | Optional override. Unset uses pyEight's built-in app client id. The Supabase function uses the same pair |
+| `EIGHT_SLEEP_CLIENT_SECRET` | Optional override. Unset uses pyEight's built-in app client secret. The Supabase function uses the same pair |
 
 WHOOP app scopes: `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, `read:profile`, `read:body_measurement`. Request `offline` in the authorize URL. It is not a checkbox on the app form. Privacy policy URL for that app is the `PRIVACY.md` file in this repo.
 
@@ -148,7 +148,7 @@ Access tokens expire in about an hour. `apply.py` refreshes them. Reconnect only
 
 ## Reconnect Eight Sleep
 
-Python logs in with `EIGHT_SLEEP_EMAIL` and `EIGHT_SLEEP_PASSWORD` through pyEight on each run. There is no separate OAuth app, and `apply.py` does not read or write `eight_session.json`. Leave client id and secret unset unless you need to override the library defaults. The Supabase function still expects `EIGHT_SLEEP_CLIENT_ID` and `EIGHT_SLEEP_CLIENT_SECRET` in that project's secrets.
+Python logs in with `EIGHT_SLEEP_EMAIL` and `EIGHT_SLEEP_PASSWORD` through pyEight on each run. There is no separate OAuth app, and `apply.py` does not read or write `eight_session.json`. Leave client id and secret unset unless you need to override the library defaults. The Supabase function uses the same built-in app client pair when those secrets are unset.
 
 1. Put the current password in `EIGHT_SLEEP_PASSWORD`.
 2. Run `podshift/eight_status.py` or `apply.py --dry-run`.
