@@ -1,0 +1,49 @@
+# Crimson Gremlin / Pullfrog — Codex write-capable across AStrasler repositories.
+# GitHub Actions account budget: $0; no agent auto-merge.
+name: Pullfrog
+run-name: ${{ inputs.name || github.workflow }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Agent task or Aikido remediation context
+        type: string
+        required: true
+      name:
+        description: Run name
+        type: string
+        required: false
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  checks: read
+
+concurrency:
+  group: pullfrog-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  pullfrog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Run native Codex through Pullfrog
+        uses: pullfrog/pullfrog@v0
+        env:
+          PULLFROG_AGENT: codex
+        with:
+          prompt: ${{ inputs.prompt }}
+          model: openai/gpt-sol
+          timeout: 8m
+          push: enabled
+          shell: restricted
