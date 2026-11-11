@@ -8,15 +8,11 @@ coordinate with Supabase. Leave the daemon that calls it stopped.
 
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
 
 from apply import TZ, already_applied_tonight, append_scheduler_log, apply_lock
-
-HERE = Path(__file__).resolve().parent
-
+from safe_process import run_local_script
 
 def decision(now: datetime | None = None) -> dict:
     prior = already_applied_tonight(now)
@@ -44,17 +40,9 @@ def main() -> None:
             append_scheduler_log(result)
         print(json.dumps(result))
         if result["action"] == "apply" and dry_run:
-            subprocess.run(
-                [sys.executable, str(HERE / "apply.py"), "--dry-run", "--scheduler", "fallback"],
-                check=True,
-                env=os.environ.copy(),
-            )
+            run_local_script("apply.py", "--dry-run", "--scheduler", "fallback", check=True)
         return
-    completed = subprocess.run(
-        [sys.executable, str(HERE / "apply.py"), "--scheduler", "fallback"],
-        check=False,
-        env=os.environ.copy(),
-    )
+    completed = run_local_script("apply.py", "--scheduler", "fallback")
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
 
