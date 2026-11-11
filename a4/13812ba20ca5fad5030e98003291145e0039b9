@@ -1,0 +1,16 @@
+podshift/safe_process.py
+  h_43bd93ed2f90ff 21-42,51,55
+tests/test_safe_process.py
+  h_43bd93ed2f90ff 2,4,27,55-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a413812ba20ca5fad5030e98003291145e0039b9",
+  "prompts": {},
+  "humans": {
+    "h_43bd93ed2f90ff": {
+      "author": "Aaron Strasler <Aaron.M.Strasler@outlook.com>"
+    }
+  }
+}
