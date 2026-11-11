@@ -1,0 +1,18 @@
+podshift/fallback.py
+  h_43bd93ed2f90ff 11,47,50,54,57
+podshift/fallback_daemon.py
+  h_43bd93ed2f90ff 9,65,68
+requirements.txt
+  h_43bd93ed2f90ff 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5d621e03bd2db3d8464777537c1e5a508dac7fea",
+  "prompts": {},
+  "humans": {
+    "h_43bd93ed2f90ff": {
+      "author": "Aaron Strasler <Aaron.M.Strasler@outlook.com>"
+    }
+  }
+}
