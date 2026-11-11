@@ -1,0 +1,19 @@
+tests/test_safe_process.py
+  s_2467b4e7c1e9d3::t_5f302f22280af8 2,60-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d18a80ff836407596b6e3accb829e80c578ef45b",
+  "prompts": {},
+  "sessions": {
+    "s_2467b4e7c1e9d3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1ca20-9bd8-7b31-9a5d-8a496aa086a2",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Aaron Strasler <Aaron.M.Strasler@outlook.com>"
+    }
+  }
+}
