@@ -8,7 +8,7 @@ coordinate with Supabase. Leave the daemon that calls it stopped.
 
 import json
 import os
-import subprocess
+import subprocess  # nosec B404
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -44,15 +44,17 @@ def main() -> None:
             append_scheduler_log(result)
         print(json.dumps(result))
         if result["action"] == "apply" and dry_run:
-            subprocess.run(
+            subprocess.run(  # nosec B603
                 [sys.executable, str(HERE / "apply.py"), "--dry-run", "--scheduler", "fallback"],
                 check=True,
+                shell=False,
                 env=os.environ.copy(),
             )
         return
-    completed = subprocess.run(
+    completed = subprocess.run(  # nosec B603
         [sys.executable, str(HERE / "apply.py"), "--scheduler", "fallback"],
         check=False,
+        shell=False,
         env=os.environ.copy(),
     )
     if completed.returncode != 0:

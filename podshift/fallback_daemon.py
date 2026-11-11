@@ -6,7 +6,7 @@ The Supabase Edge Function is the nightly scheduler. Leave this daemon stopped.
 
 import json
 import os
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from datetime import datetime, timedelta
@@ -62,9 +62,10 @@ def main() -> None:
             time.sleep(remaining)
         if paused():
             continue
-        subprocess.run(
+        subprocess.run(  # nosec B603
             [sys.executable, str(HERE / "fallback.py")],
             check=False,
+            shell=False,
             env=os.environ.copy(),
         )
         time.sleep(90)
