@@ -15,13 +15,7 @@ on:
         type: string
         required: false
 
-permissions:
-  id-token: write
-  contents: write
-  pull-requests: write
-  issues: write
-  actions: read
-  checks: read
+permissions: {}
 
 concurrency:
   group: pullfrog-${{ github.repository }}
@@ -29,16 +23,19 @@ concurrency:
 
 jobs:
   pullfrog:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 1
       - name: Run native Codex through Pullfrog
-        uses: pullfrog/pullfrog@v0
+        uses: pullfrog/pullfrog@88bcc3d4bb26951b99fafe09f65d90d20d5b6d62 # v0
         env:
           PULLFROG_AGENT: codex
         with:
