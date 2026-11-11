@@ -1,4 +1,5 @@
 """Regression tests for the local fallback subprocess boundary."""
+import errno
 import os
 import sys
 import tempfile
@@ -56,7 +57,26 @@ class SafeProcessTests(unittest.TestCase):
         """A venv's bin/python is a symlink; the child must keep that path."""
         with tempfile.TemporaryDirectory() as tmp:
             link = Path(tmp) / ("venv-python.exe" if os.name == "nt" else "venv-python")
-            link.symlink_to(Path(sys.executable).resolve())
+            try:
+                link.symlink_to(Path(sys.executable).resolve())
+            except (NotImplementedError, OSError) as exc:
+                unavailable_errnos = {
+                    errno.EACCES,
+                    errno.EPERM,
+                    getattr(errno, "ENOSYS", -1),
+                    getattr(errno, "ENOTSUP", -1),
+                    getattr(errno, "EOPNOTSUPP", -1),
+                }
+                unavailable_winerrors = {1, 5, 50, 1314}
+                if isinstance(exc, NotImplementedError) or (
+                    isinstance(exc, OSError)
+                    and (
+                        exc.errno in unavailable_errnos
+                        or getattr(exc, "winerror", None) in unavailable_winerrors
+                    )
+                ):
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+                raise
             with patch.object(safe_process.sys, "executable", str(link)):
                 safe_process.run_local_script("fallback.py")
             positional, _ = self.mock_run.call_args
