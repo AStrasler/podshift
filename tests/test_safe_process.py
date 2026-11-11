@@ -1,5 +1,7 @@
 """Regression tests for the local fallback subprocess boundary."""
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -22,7 +24,7 @@ class SafeProcessTests(unittest.TestCase):
             with self.subTest(args=args):
                 safe_process.run_local_script("apply.py", *args, check=check)
                 positional, kw = self.mock_run.call_args
-                self.assertEqual(positional[0][0], str(Path(sys.executable).resolve()))
+                self.assertEqual(positional[0][0], os.path.abspath(sys.executable))
                 self.assertEqual(positional[0][1], str((safe_process._ROOT / "apply.py").resolve()))
                 self.assertEqual(positional[0][2:], list(args))
                 self.assertIs(kw["shell"], False)
@@ -48,6 +50,29 @@ class SafeProcessTests(unittest.TestCase):
             with self.subTest(script=script, args=args):
                 with self.assertRaises(ValueError):
                     safe_process.run_local_script(script, *args)
+        self.mock_run.assert_not_called()
+
+    def test_venv_style_symlinked_interpreter_is_not_resolved(self):
+        """A venv's bin/python is a symlink; the child must keep that path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            link = Path(tmp) / ("venv-python.exe" if os.name == "nt" else "venv-python")
+            link.symlink_to(Path(sys.executable).resolve())
+            with patch.object(safe_process.sys, "executable", str(link)):
+                safe_process.run_local_script("fallback.py")
+            positional, _ = self.mock_run.call_args
+            self.assertEqual(positional[0][0], str(link))
+            self.assertNotEqual(positional[0][0], str(link.resolve()))
+
+    def test_missing_or_non_executable_interpreter_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "nope")
+            non_exec = Path(tmp) / "plain.txt"
+            non_exec.write_text("x")
+            for bad in ("", missing, str(non_exec)):
+                with self.subTest(executable=bad):
+                    with patch.object(safe_process.sys, "executable", bad):
+                        with self.assertRaises(RuntimeError):
+                            safe_process.run_local_script("fallback.py")
         self.mock_run.assert_not_called()
 
     def test_return_code_propagation(self):
