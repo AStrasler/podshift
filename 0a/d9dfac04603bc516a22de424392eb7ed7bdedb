@@ -1,0 +1,20 @@
+podshift/fallback.py
+  h_43bd93ed2f90ff 15,43,45
+podshift/fallback_daemon.py
+  h_43bd93ed2f90ff 14,62
+podshift/safe_process.py
+  h_43bd93ed2f90ff 1-41
+tests/test_safe_process.py
+  h_43bd93ed2f90ff 1-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ad9dfac04603bc516a22de424392eb7ed7bdedb",
+  "prompts": {},
+  "humans": {
+    "h_43bd93ed2f90ff": {
+      "author": "Aaron Strasler <Aaron.M.Strasler@outlook.com>"
+    }
+  }
+}
