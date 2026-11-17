@@ -149,14 +149,16 @@ class EightPod:
             await session.close()
 
     async def _read(self) -> dict:
-        assert self._eight is not None and self._user_id is not None
+        if self._eight is None or self._user_id is None:
+            raise SystemExit("eight client is closed")
         body = await self._eight.api_request("GET", temperature_url(self._user_id))
         if not isinstance(body, dict):
             raise SystemExit("eight temperature read failed")
         return body
 
     async def _write_smart(self, levels: dict) -> None:
-        assert self._eight is not None and self._user_id is not None
+        if self._eight is None or self._user_id is None:
+            raise SystemExit("eight client is closed")
         url = temperature_url(self._user_id)
         current = await self._eight.api_request("GET", url)
         source = current.get("smart") if isinstance(current, dict) else None
@@ -170,7 +172,8 @@ class EightPod:
         )
 
     async def _set_power(self, state: str) -> None:
-        assert self._eight is not None and self._user_id is not None
+        if self._eight is None or self._user_id is None:
+            raise SystemExit("eight client is closed")
         await self._eight.api_request(
             "PUT",
             temperature_url(self._user_id),
@@ -179,7 +182,8 @@ class EightPod:
         )
 
     async def _profile(self) -> dict:
-        assert self._eight is not None
+        if self._eight is None:
+            raise SystemExit("eight client is closed")
         return await self._eight.api_request("GET", f"{CLIENT_API_URL}/users/me")
 
 
