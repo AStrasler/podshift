@@ -8,7 +8,16 @@ const localDate = () => {
   const part = (type: string) => parts.find(value => value.type === type)!.value;
   return part("year") + "-" + part("month") + "-" + part("day");
 };
-const levels = ["bedTimeLevel", "initialSleepLevel", "finalSleepLevel"] as const;
+type Levels = {
+  bedTimeLevel: number;
+  initialSleepLevel: number;
+  finalSleepLevel: number;
+};
+type LevelSnapshot = {
+  bedTimeLevel: number | null;
+  initialSleepLevel: number | null;
+  finalSleepLevel: number | null;
+};
 
 type State = {
   cron_key: string; whoop_refresh_token: string | null;
@@ -120,25 +129,34 @@ function offsetFor(score: number) {
   // Same bands as podshift/apply.py. Do not add felt-temperature rules here.
   return score >= 67 ? 0 : score >= 34 ? -5 : -10;
 }
-function target(baseline: Record<string, number>, score: number) {
+function target(baseline: Record<string, number>, score: number): { expected: Levels; offset: number } {
   const offset = offsetFor(score);
-  const expected: Record<string, number> = {};
-  for (const stage of levels) {
-    const original = baseline[stage];
+  const bedTimeLevel = baseline.bedTimeLevel;
+  const initialSleepLevel = baseline.initialSleepLevel;
+  const finalSleepLevel = baseline.finalSleepLevel;
+  for (const original of [bedTimeLevel, initialSleepLevel, finalSleepLevel]) {
     if (!Number.isInteger(original) || original < -100 || original > 100)
       throw new RunError("invalid_baseline", { score, offset });
-    expected[stage] = Math.max(-100, Math.min(100, original + offset));
   }
+  const expected: Levels = {
+    bedTimeLevel: Math.max(-100, Math.min(100, bedTimeLevel + offset)),
+    initialSleepLevel: Math.max(-100, Math.min(100, initialSleepLevel + offset)),
+    finalSleepLevel: Math.max(-100, Math.min(100, finalSleepLevel + offset)),
+  };
   return { expected, offset };
 }
-function smartSnapshot(body: { smart?: Record<string, unknown> }) {
+function smartSnapshot(body: { smart?: Record<string, unknown> }): LevelSnapshot {
   const smart = body.smart ?? {};
-  const snapshot: Record<string, number | null> = {};
-  for (const stage of levels) {
-    const value = smart[stage];
-    snapshot[stage] = typeof value === "number" ? value : null;
-  }
-  return snapshot;
+  return {
+    bedTimeLevel: typeof smart.bedTimeLevel === "number" ? smart.bedTimeLevel : null,
+    initialSleepLevel: typeof smart.initialSleepLevel === "number" ? smart.initialSleepLevel : null,
+    finalSleepLevel: typeof smart.finalSleepLevel === "number" ? smart.finalSleepLevel : null,
+  };
+}
+function matchesLevels(snapshot: LevelSnapshot, expected: Levels) {
+  return snapshot.bedTimeLevel === expected.bedTimeLevel &&
+    snapshot.initialSleepLevel === expected.initialSleepLevel &&
+    snapshot.finalSleepLevel === expected.finalSleepLevel;
 }
 function asJson(value: Record<string, number | null> | undefined) {
   if (value === undefined) return null;
@@ -185,7 +203,7 @@ async function run(state: State, dryRun: boolean): Promise<NightResult> {
     const eight = await pod();
     const before = await eight.read();
     const beforeLevels = smartSnapshot(before);
-    observed.matched_before = levels.every(stage => beforeLevels[stage] === expected[stage]);
+    observed.matched_before = matchesLevels(beforeLevels, expected);
     observed.before_levels = beforeLevels;
     if (dryRun) return { outcome: "dry_run", applied: false, ...observed };
     // Claimed scored nights always PUT, including when the Pod already matches.
@@ -203,7 +221,7 @@ async function run(state: State, dryRun: boolean): Promise<NightResult> {
       after = await eight.read();
       if (after.currentState?.type !== beforePower) throw new RunError("power_restore_failed", observed);
     }
-    if (!levels.every(stage => after.smart?.[stage] === expected[stage]))
+    if (!matchesLevels(smartSnapshot(after), expected))
       throw new RunError("write_not_verified", observed);
     return { outcome: "applied", applied: true, ...observed };
   } catch (error) {
