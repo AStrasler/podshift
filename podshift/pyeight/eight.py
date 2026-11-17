@@ -359,13 +359,15 @@ class EightSleep:
 
         url = f"{APP_API_URL}v1/users/{user.user_id}/audio/player"
 
+        if self._api_session is None or self._api_session.closed:
+            raise RequestError("Eight Sleep API session is closed")
+
         # Direct request, not api_request(): a 404 here means "no speaker",
         # which api_request() would log at ERROR every call.
         token_data = await self.token
         headers = dict(DEFAULT_API_HEADERS)
         headers["authorization"] = f"Bearer {token_data.bearer_token}"
 
-        assert self._api_session
         try:
             resp = await self._api_session.request(
                 "get", url, headers=headers, timeout=CLIENT_TIMEOUT
@@ -524,6 +526,8 @@ class EightSleep:
         _is_retry: bool = False
     ) -> Any:
         """Make api request with 401 retry."""
+        if self._api_session is None or self._api_session.closed:
+            raise RequestError("Eight Sleep API session is closed")
 
         current_headers: dict[str, Any] # Define type for current_headers
         if input_headers is not None:
@@ -537,7 +541,6 @@ class EightSleep:
         current_headers["authorization"] = f"Bearer {token_data.bearer_token}"
 
         try:
-            assert self._api_session
             resp = await self._api_session.request(
                 method,
                 url,
